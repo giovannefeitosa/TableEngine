@@ -162,3 +162,18 @@ Ao carregar o formulário do registro no frontend Next.js:
    ```
 4. O componente de cabeçalho do formulário renderiza os botões dinamicamente (ex.: `[ Iniciar Atendimento ]`, `[ Resolver Incidente ]`, `[ Cancelar Chamado ]`).
 5. Ao clicar, a UI abre eventuais campos obrigatórios não preenchidos e despacha a requisição para `POST /api/v1/records/:table/:sys_id/transitions/:transition_id`.
+
+---
+
+## 7. Ciclo de Vida CRUD e Visualização em Página Própria de Detalhes
+
+* **Página Própria de Cada Transição:** No FSM Studio, clicar em qualquer transição de estado ou em "Nova Transição" navega para a página dedicada da entidade `sys_state_transition`, sem o uso de caixas modais.
+* **Edição In-Place na Mesma Tela:** A página de detalhes exibe os campos do ciclo de vida (Tabela, Estado de Origem, Estado de Destino, Rótulo, Papel Exigido, Condição Guard AST, Ação Mutadora On-Transition e status Ativo). O botão **"Editar"** permite modificar a configuração no mesmo layout visual.
+* **Exclusão com Confirmação:** O botão **"Excluir"** remove fisicamente a transição do catálogo com validação atômica no PostgreSQL.
+* **Contratos REST de Suporte:**
+  * `GET /api/v1/fsm/transitions` (Listagem completa)
+  * `GET /api/v1/fsm/transitions/:transition_id` (Consulta individual detalhada)
+  * `POST /api/v1/fsm/transitions` (Criação de nova regra de transição)
+  * `PUT /api/v1/fsm/transitions/:transition_id` (Atualização in-place)
+  * `DELETE /api/v1/fsm/transitions/:transition_id` (Exclusão física no catálogo)
+

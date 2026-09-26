@@ -244,6 +244,24 @@ Esta especificação define todos os contratos HTTP da API REST do **TableEngine
   ```
 * **Response (201 Created)**
 
+### 3.5.1 Listar Opções de Dropdown de uma Tabela com Herança
+* **Método:** `GET`
+* **Rota:** `/api/v1/schema/tables/:table_name/choices`
+* **Descrição:** Retorna todas as opções (`sys_choice`) registradas para a tabela e suas classes ancestrais (via CTE recursiva de linhagem).
+* **Response (200 OK):**
+  ```json
+  [
+    {
+      "sys_id": "55555555-5555-5555-5555-555555555555",
+      "element": "state",
+      "value": "in_progress",
+      "label": "Em Andamento",
+      "sequence": 20
+    }
+  ]
+  ```
+
+
 ### 3.6 Configurar Numeração Automática (`sys_number`)
 * **Método:** `POST`
 * **Rota:** `/api/v1/schema/numbers`
@@ -447,3 +465,147 @@ Esta especificação define todos os contratos HTTP da API REST do **TableEngine
     }
   ]
   ```
+
+---
+
+## 7. CRUD Direto de Metadados de Schema (`/schema`)
+
+### 7.1 Obter Detalhes da Tabela
+* **Método:** `GET`
+* **Rota:** `/api/v1/schema/tables/:table_id`
+* **Response (200 OK):** Detalhes da tabela (sys_id, name, label, super_class_id, is_extendable, is_kernel_table, sys_created_on).
+
+### 7.2 Atualizar Propriedades da Tabela
+* **Método:** `PUT`
+* **Rota:** `/api/v1/schema/tables/:table_id`
+* **Request Body:**
+  ```json
+  {
+    "label": "Incidente Crítico",
+    "is_extendable": true
+  }
+  ```
+* **Response (200 OK)**
+
+### 7.3 Excluir Tabela em Cascata
+* **Método:** `DELETE`
+* **Rota:** `/api/v1/schema/tables/:table_id`
+* **Descrição:** Executa `DROP TABLE <table_name> CASCADE`, remove views associadas e expurga registros em `sys_db_object`, `sys_dictionary` e tabelas de segurança.
+* **Response (204 No Content)**
+
+### 7.4 Obter / Atualizar / Excluir Campo (`sys_dictionary`)
+* **Método:** `GET` / `PUT` / `DELETE`
+* **Rotas:** `/api/v1/schema/fields/:field_id`
+* **PUT Request Body:**
+  ```json
+  {
+    "label": "Prioridade Operacional",
+    "is_mandatory": true,
+    "is_read_only": false,
+    "default_value": "3"
+  }
+  ```
+* **DELETE Descrição:** Remove a coluna física da tabela (`ALTER TABLE DROP COLUMN ... CASCADE`), remove do dicionário e regenera automaticamente as views polimórficas.
+* **Response:** 200 OK (GET/PUT) ou 204 No Content (DELETE).
+
+### 7.5 Obter / Atualizar / Excluir Opção de Dropdown (`sys_choice`)
+* **Método:** `GET` / `PUT` / `DELETE`
+* **Rotas:** `/api/v1/schema/choices/:choice_id`
+* **PUT Request Body:**
+  ```json
+  {
+    "label": "Em Resolução",
+    "value": "resolving",
+    "sequence": 25,
+    "is_active": true
+  }
+  ```
+* **Response:** 200 OK (GET/PUT) ou 204 No Content (DELETE).
+
+---
+
+## 8. CRUD de Transições FSM e Regras de Negócio
+
+### 8.1 FSM State Transitions (`/fsm/transitions`)
+* **Listar:** `GET /api/v1/fsm/transitions`
+* **Obter Detalhes:** `GET /api/v1/fsm/transitions/:transition_id`
+* **Criar:** `POST /api/v1/fsm/transitions`
+* **Atualizar:** `PUT /api/v1/fsm/transitions/:transition_id`
+  ```json
+  {
+    "table_id": "22222222-2222-2222-2222-222222222222",
+    "state_field": "state",
+    "from_state": "in_progress",
+    "to_state": "resolved",
+    "label": "Resolver Chamado",
+    "required_role_id": "44444444-4444-4444-4444-444444444444",
+    "condition_tree": { "operator": "AND", "rules": [] },
+    "on_transition_action": { "set_fields": { "resolved_at": "$NOW" } },
+    "is_active": true
+  }
+  ```
+* **Excluir:** `DELETE /api/v1/fsm/transitions/:transition_id` (204 No Content)
+
+### 8.2 Business Rules (`/rules/scripts`)
+* **Listar:** `GET /api/v1/rules/scripts`
+* **Obter Detalhes:** `GET /api/v1/rules/scripts/:rule_id`
+* **Criar:** `POST /api/v1/rules/scripts`
+* **Atualizar:** `PUT /api/v1/rules/scripts/:rule_id`
+  ```json
+  {
+    "table_id": "22222222-2222-2222-2222-222222222222",
+    "name": "Validação de Severidade",
+    "timing": "before_insert",
+    "execution_order": 100,
+    "execution_mode": "caller",
+    "action_type": "abort_transaction",
+    "condition_expression": { "operator": "AND", "rules": [] },
+    "action_payload": { "message": "Gravidade inválida!", "status_code": 422 },
+    "is_active": true
+  }
+  ```
+* **Excluir:** `DELETE /api/v1/rules/scripts/:rule_id` (204 No Content)
+
+---
+
+## 9. Gestão de Identidade e Segurança RBAC (`/rbac`)
+
+### 9.1 CRUD de Usuários (`/rbac/users`)
+* **Listar:** `GET /api/v1/rbac/users`
+* **Obter:** `GET /api/v1/rbac/users/:user_id` (inclui grupos vinculados e roles herdadas)
+* **Criar:** `POST /api/v1/rbac/users`
+  ```json
+  {
+    "user_name": "joao.silva",
+    "first_name": "João",
+    "last_name": "Silva",
+    "email": "joao.silva@empresa.com",
+    "is_active": true,
+    "password": "SenhaSegura123!",
+    "group_ids": ["33333333-3333-3333-3333-333333333333"]
+  }
+  ```
+* **Atualizar:** `PUT /api/v1/rbac/users/:user_id` (permite atualizar dados, grupos vinculados e redefinir senha com bcrypt se enviada)
+* **Excluir:** `DELETE /api/v1/rbac/users/:user_id` (limpa credenciais e vínculos de grupos)
+
+### 9.2 CRUD de Grupos (`/rbac/groups`)
+* **Listar:** `GET /api/v1/rbac/groups`
+* **Obter:** `GET /api/v1/rbac/groups/:group_id` (inclui role_ids associadas e contagem de membros)
+* **Criar:** `POST /api/v1/rbac/groups`
+* **Atualizar:** `PUT /api/v1/rbac/groups/:group_id` (sincroniza metadados e role_ids vinculadas)
+* **Excluir:** `DELETE /api/v1/rbac/groups/:group_id`
+
+### 9.3 CRUD de Roles / Papéis (`/rbac/roles`)
+* **Listar:** `GET /api/v1/rbac/roles`
+* **Obter:** `GET /api/v1/rbac/roles/:role_id` (inclui permission_ids associadas)
+* **Criar:** `POST /api/v1/rbac/roles`
+* **Atualizar:** `PUT /api/v1/rbac/roles/:role_id` (sincroniza metadados e permission_ids vinculadas)
+* **Excluir:** `DELETE /api/v1/rbac/roles/:role_id`
+
+### 9.4 CRUD de Permissões (`/rbac/permissions`)
+* **Listar:** `GET /api/v1/rbac/permissions`
+* **Obter:** `GET /api/v1/rbac/permissions/:permission_id`
+* **Criar:** `POST /api/v1/rbac/permissions`
+* **Atualizar:** `PUT /api/v1/rbac/permissions/:permission_id`
+* **Excluir:** `DELETE /api/v1/rbac/permissions/:permission_id`
+

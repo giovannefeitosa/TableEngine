@@ -171,3 +171,18 @@ A resolução de regras é polimórfica:
    * 1º: Regra A (`tbl_task`, ordem 100)
    * 2º: Regra C (`tbl_incident`, ordem 150)
    * 3º: Regra B (`tbl_task`, ordem 200)
+
+---
+
+## 8. Ciclo de Vida CRUD e Visualização em Página Própria de Detalhes
+
+* **Página Própria de Cada Regra:** No Rules Studio, clicar em qualquer regra de negócio ou em "Nova Regra" abre a página dedicada da entidade `sys_script`, eliminando diálogos sobrepostos.
+* **Edição In-Place na Mesma Tela:** A página de detalhes exibe todos os parâmetros (nome, tabela, timing, ordem de execução, modo de execução, usuário executor, tipo de ação, condição AST e payload da ação). O botão **"Editar"** permite modificar qualquer propriedade mantendo rigorosamente a mesma disposição visual na tela.
+* **Exclusão com Confirmação:** O botão **"Excluir"** permite revogar e expurgar a regra de negócio com confirmação e retorno instantâneo à listagem.
+* **Contratos REST de Suporte:**
+  * `GET /api/v1/rules/scripts` (Listagem com filtros)
+  * `GET /api/v1/rules/scripts/:rule_id` (Consulta individual detalhada)
+  * `POST /api/v1/rules/scripts` (Criação com validação de AST)
+  * `PUT /api/v1/rules/scripts/:rule_id` (Atualização atômica in-place)
+  * `DELETE /api/v1/rules/scripts/:rule_id` (Exclusão física com expurgo de trigger)
+

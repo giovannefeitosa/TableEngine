@@ -1108,3 +1108,28 @@ O usuário reúne os acessos dos dois grupos. Para executar a transição para r
 
 Referência conceitual: [ServiceNow — Assign a group role](https://www.servicenow.com/docs/r/platform-administration/user-administration/t_AssignRoleToGroup.html).
 
+---
+
+## **12. Arquitetura de Interface: Visualização em Páginas Próprias de Detalhes (Form View) e CRUD Universal**
+
+### **12.1 Princípio da Página Dedicada por Entidade (Eliminação de Diálogos e Modais)**
+Para proporcionar uma experiência profissional e alinhada às plataformas de grande porte (ServiceNow, Salesforce Lightning), **todas as entidades da plataforma possuem sua própria página completa de visualização/edição, extinguindo caixas de diálogo e modais sobrepostos**:
+1. **Navegação Limpa:** Clicar em qualquer registro ou configuração na listagem substitui a tabela pela visualização detalhada da entidade correspondente, fornecendo barra de navegação/breadcrumbs para retorno à lista.
+2. **Edição In-Place na Mesma Tela:** A tela de detalhes abre por padrão no modo de visualização. O usuário dispõe de um botão de ação **"Editar"** que transforma o formulário em modo interativo de edição no **mesmo layout e mantendo rigorosamente a mesma disposição visual dos campos**, evitando trocas abruptas de tela ou caixas flutuantes.
+3. **Botão de Exclusão Direta:** Cada página de detalhes dispõe do botão **"Excluir"**, permitindo expurgar a entidade diretamente de sua tela com validação atômica no banco de dados e retorno à listagem.
+
+### **12.2 Cobertura Completa de CRUD em Todas as Entidades**
+* **Record Studio:** Navegação e formulários dinâmicos para qualquer tabela física ou visão TPT polimórfica, suporte a concorrência otimista (`sys_mod_count`), botões dinâmicos de transição de estado FSM e gaveta lateral de trilha de auditoria universal (`sys_audit`).
+* **Schema Studio:**
+  * **Tabelas (`sys_db_object`):** Página de detalhes com formulário para atualizar propriedades (rótulo, permissão de herança) e exclusão com cascateamento físico (`DROP TABLE ... CASCADE`).
+  * **Campos (`sys_dictionary`):** Página própria de formulário para criação, edição in-place (rótulo, obrigatoriedade, somente-leitura, valor padrão) e exclusão física da coluna (`ALTER TABLE ... DROP COLUMN ... CASCADE`) com regeneração imediata de views polimórficas.
+  * **Opções Choice (`sys_choice`):** Página própria de formulário para criação, edição in-place de valores e exclusão física.
+* **Máquina de Estados FSM (`sys_state_transition`):** Página de detalhes da transição com edição in-place dos estados de origem/destino, rótulo, papel exigido, editor de árvore de condições JSON AST e ação mutadora `on_transition_action`, com exclusão física no catálogo.
+* **Regras de Negócio (`sys_script`):** Página de detalhes da regra com edição in-place de nome, tabela, timing, ordem, modo de execução, usuário executor, tipo de ação, condição AST e script/payload da ação, com exclusão física no catálogo.
+* **Identidade e Segurança RBAC:** Módulo dedicado que unifica em telas com o mesmo padrão visual de formulário:
+  * **Usuários (`sys_user`):** CRUD com gestão segura de senha (criptografada com bcrypt em `sys_user_credential`) e associação direta a grupos.
+  * **Grupos (`sys_user_group`):** CRUD com associação direta a papéis (roles) e visualização de membros.
+  * **Papéis / Roles (`sys_user_role`):** CRUD com associação direta a permissões de recursos.
+  * **Permissões (`sys_permission`):** CRUD com definição de tabelas, operações (`create`, `read`, `update`, `delete`, `execute`), campos e árvores de condições.
+
+

@@ -125,4 +125,19 @@ CREATE INDEX idx_role_permission_permission ON sys_role_has_permission(permissio
    * Criar um usuário como `is_active = true` ou ativá-lo exige vinculação a pelo menos um grupo ativo.
    * Remover o último grupo de um usuário ativo ou desativar esse grupo exige transferi-lo para outro grupo ativo ou desativar o usuário na mesma transação sob isolamento `SERIALIZABLE`.
 2. **Preservação de Histórico (`ON DELETE RESTRICT`):**
-   * Usuários e cadastros de segurança referenciados em auditoria e metadados não podem ser excluídos fisicamente. Utiliza-se desativação lógica (`is_active = false`).
+   * Usuários e cadastros de segurança referenciados em auditoria e metadados não podem ser excluídos fisicamente se vinculados a logs imutáveis. Utiliza-se desativação lógica (`is_active = false`) ou exclusão em cascata controlada dos vínculos associativos (`sys_user_grmember`, `sys_group_has_role`, `sys_role_has_permission`).
+
+---
+
+## 5. Ciclo de Vida CRUD e Visualização em Formulário Próprio (Form View)
+
+Seguindo o padrão unificado de interface do **TableEngine**:
+* **Páginas Dedicadas (Sem Diálogos/Modais):** Cada entidade de segurança (`sys_user`, `sys_user_group`, `sys_user_role`, `sys_permission`) possui sua própria página de visualização e edição detalhada, eliminando modais e diálogos sobrepostos.
+* **Edição no Mesmo Formulário (In-Place Edit):** A página de detalhes abre inicialmente em modo de leitura (visualização dos campos formatados). Ao clicar no botão **"Editar"**, a página entra em modo de edição mantendo **exatamente as mesmas posições dos componentes na tela**, permitindo alterar os campos e salvar no mesmo layout.
+* **Exclusão com Feedback Seguro:** Cada entidade possui o botão **"Excluir"** no cabeçalho do formulário, que valida vínculos e executa a remoção atômica no banco com retorno à listagem.
+* **Gerenciamento de Credenciais:** Ao criar ou atualizar um usuário em seu formulário, a senha informada é criptografada com **bcrypt** (fator de custo 12) e persistida em `sys_user_credential`.
+* **Vínculos M:N Diretos no Formulário:**
+  * O formulário do Usuário permite selecionar e vincular Grupos diretamente.
+  * O formulário do Grupo permite selecionar e vincular Roles diretamente.
+  * O formulário da Role permite selecionar e vincular Permissões diretamente.
+
