@@ -642,3 +642,287 @@ func mapTypeToPostgresDDL(iType string, maxLen int, defVal *string, refTableID *
 
 	return ddl, isAutoNum
 }
+
+func sanitizeIdentifier(s string) string {
+	cleaned := strings.ReplaceAll(s, `"`, "")
+	cleaned = strings.ReplaceAll(cleaned, `;`, "")
+	cleaned = strings.ReplaceAll(cleaned, `--`, "")
+	return cleaned
+}
+
+// GetTable retrieves table metadata by UUID or by physical name.
+func (e *Engine) GetTable(ctx context.Context, idOrName string) (*TableInfo, error) {
+	var t TableInfo
+	query := `
+		SELECT sys_id, name, label, super_class_id, is_extendable, is_kernel_table, sys_created_on
+		FROM sys_db_object
+	`
+	var err error
+	if parsedID, parseErr := uuid.Parse(idOrName); parseErr == nil {
+		err = e.db.Pool.QueryRow(ctx, query+" WHERE sys_id = $1", parsedID).Scan(
+			&t.SysID, &t.Name, &t.Label, &t.SuperClassID, &t.IsExtendable, &t.IsKernelTable, &t.SysCreatedOn,
+		)
+	} else {
+		err = e.db.Pool.QueryRow(ctx, query+" WHERE name = $1", idOrName).Scan(
+			&t.SysID, &t.Name, &t.Label, &t.SuperClassID, &t.IsExtendable, &t.IsKernelTable, &t.SysCreatedOn,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tabela '%s' não encontrada: %w", idOrName, err)
+	}
+	t.ViewName = fmt.Sprintf("v_%s", strings.TrimPrefix(t.Name, "tbl_"))
+	return &t, nil
+}
+
+// UpdateTable updates mutable metadata of a table.
+func (e *Engine) UpdateTable(ctx context.Context, id uuid.UUID, label string, isExtendable bool, userCtx *auth.SecurityContext) (*TableInfo, error) {
+	err := auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE sys_db_object
+			SET label = $1, is_extendable = $2, sys_updated_on = clock_timestamp(), sys_updated_by = $3
+			WHERE sys_id = $4
+		`, label, isExtendable, userCtx.UserID, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errors.New("tabela não encontrada para atualização")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.GetTable(ctx, id.String())
+}
+
+// DeleteTable drops the physical table with CASCADE and cleans up all system metadata.
+func (e *Engine) DeleteTable(ctx context.Context, id uuid.UUID, userCtx *auth.SecurityContext) error {
+	t, err := e.GetTable(ctx, id.String())
+	if err != nil {
+		return err
+	}
+	if t.IsKernelTable {
+		return errors.New("não é permitido excluir tabelas fundamentais do Kernel do sistema")
+	}
+
+	// Check if other tables extend this table
+	var childCount int64
+	err = e.db.Pool.QueryRow(ctx, "SELECT count(*) FROM sys_db_object WHERE super_class_id = $1", id).Scan(&childCount)
+	if err != nil {
+		return err
+	}
+	if childCount > 0 {
+		return fmt.Errorf("não é possível excluir a tabela '%s' pois existem %d tabela(s) derivada(s) que herdam dela. Exclua as tabelas filhas primeiro.", t.Name, childCount)
+	}
+
+	return auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		// 1. Delete numbers and counters
+		if _, err := tx.Exec(ctx, `DELETE FROM sys_number_counter WHERE number_id IN (SELECT sys_id FROM sys_number WHERE table_id = $1);`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM sys_number WHERE table_id = $1;`, id); err != nil {
+			return err
+		}
+
+		// 2. Delete choices
+		if _, err := tx.Exec(ctx, "DELETE FROM sys_choice WHERE table_id = $1", id); err != nil {
+			return err
+		}
+
+		// 3. Delete rules
+		if _, err := tx.Exec(ctx, "DELETE FROM sys_script WHERE table_id = $1", id); err != nil {
+			return err
+		}
+
+		// 4. Delete transitions
+		if _, err := tx.Exec(ctx, "DELETE FROM sys_state_transition WHERE table_id = $1", id); err != nil {
+			return err
+		}
+
+		// 5. Delete permissions
+		if _, err := tx.Exec(ctx, `DELETE FROM sys_role_has_permission WHERE permission_id IN (SELECT sys_id FROM sys_permission WHERE table_id = $1);`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM sys_permission WHERE table_id = $1;`, id); err != nil {
+			return err
+		}
+
+		// 6. Delete dictionary entries
+		if _, err := tx.Exec(ctx, "DELETE FROM sys_dictionary WHERE table_id = $1", id); err != nil {
+			return err
+		}
+
+		// 7. Drop associated polymorphic view if defined
+		if t.ViewName != "" {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("DROP VIEW IF EXISTS %s CASCADE;", t.ViewName)); err != nil {
+				return fmt.Errorf("falha ao excluir view polimórfica %s: %w", t.ViewName, err)
+			}
+		}
+
+		// 8. Drop physical table
+		if _, err := tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", t.Name)); err != nil {
+			return fmt.Errorf("falha ao excluir tabela física %s: %w", t.Name, err)
+		}
+
+		// 9. Delete from sys_db_object
+		cmd, err := tx.Exec(ctx, "DELETE FROM sys_db_object WHERE sys_id = $1", id)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("tabela não encontrada no catálogo")
+		}
+		return nil
+	})
+}
+
+// GetField retrieves field definition from sys_dictionary.
+func (e *Engine) GetField(ctx context.Context, fieldID uuid.UUID) (*FieldInfo, error) {
+	query := `
+		SELECT d.sys_id, d.table_id, d.column_name, d.label, d.internal_type,
+		       COALESCE(d.max_length, 255), d.is_mandatory, d.is_read_only, d.default_value,
+		       d.reference_table_id, o.name AS defined_in_table, 0 AS inheritance_level
+		FROM sys_dictionary d
+		JOIN sys_db_object o ON o.sys_id = d.table_id
+		WHERE d.sys_id = $1
+	`
+	var f FieldInfo
+	err := e.db.Pool.QueryRow(ctx, query, fieldID).Scan(
+		&f.SysID, &f.TableID, &f.ColumnName, &f.Label, &f.InternalType,
+		&f.MaxLength, &f.IsMandatory, &f.IsReadOnly, &f.DefaultValue,
+		&f.ReferenceTableID, &f.DefinedInTable, &f.InheritanceLevel,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("campo não encontrado: %w", err)
+	}
+	return &f, nil
+}
+
+// UpdateField updates field properties in sys_dictionary.
+func (e *Engine) UpdateField(ctx context.Context, fieldID uuid.UUID, label string, isMandatory, isReadOnly bool, defaultValue *string, userCtx *auth.SecurityContext) (*FieldInfo, error) {
+	err := auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		cmd, err := tx.Exec(ctx, `
+			UPDATE sys_dictionary
+			SET label = $1, is_mandatory = $2, is_read_only = $3, default_value = $4
+			WHERE sys_id = $5
+		`, label, isMandatory, isReadOnly, defaultValue, fieldID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("campo não encontrado para atualização")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.GetField(ctx, fieldID)
+}
+
+// DeleteField drops the column from the physical table and regenerates views.
+func (e *Engine) DeleteField(ctx context.Context, fieldID uuid.UUID, userCtx *auth.SecurityContext) error {
+	var tableID uuid.UUID
+	var colName, tableName string
+	var isSystem bool
+
+	err := e.db.Pool.QueryRow(ctx, `
+		SELECT d.table_id, d.column_name, d.is_system_field, o.name
+		FROM sys_dictionary d
+		JOIN sys_db_object o ON o.sys_id = d.table_id
+		WHERE d.sys_id = $1
+	`, fieldID).Scan(&tableID, &colName, &isSystem, &tableName)
+	if err != nil {
+		return fmt.Errorf("campo não encontrado: %w", err)
+	}
+
+	if isSystem || strings.HasPrefix(colName, "sys_") {
+		return errors.New("não é permitido excluir campos do sistema (kernel)")
+	}
+
+	return auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		// Drop column physically with cascade
+		sql := fmt.Sprintf("ALTER TABLE %s DROP COLUMN IF EXISTS %s CASCADE;", tableName, sanitizeIdentifier(colName))
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("falha ao remover coluna física: %w", err)
+		}
+
+		// Delete choices referencing this column
+		_, _ = tx.Exec(ctx, "DELETE FROM sys_choice WHERE table_id = $1 AND element = $2", tableID, colName)
+
+		// Delete dictionary entry
+		cmd, err := tx.Exec(ctx, "DELETE FROM sys_dictionary WHERE sys_id = $1", fieldID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("campo não encontrado no dicionário")
+		}
+
+		// Regenerate polymorphic views
+		return e.propagatePolymorphicViews(ctx, tx, tableID)
+	})
+}
+
+// ChoiceItem represents a Choice in sys_choice.
+type ChoiceItem struct {
+	SysID          uuid.UUID `json:"sys_id"`
+	TableID        uuid.UUID `json:"table_id"`
+	Element        string    `json:"element"`
+	Value          string    `json:"value"`
+	Label          string    `json:"label"`
+	Sequence       int       `json:"sequence"`
+	IsActive       bool      `json:"is_active"`
+	DependentValue *string   `json:"dependent_value,omitempty"`
+}
+
+// GetChoice retrieves a single choice by ID.
+func (e *Engine) GetChoice(ctx context.Context, choiceID uuid.UUID) (*ChoiceItem, error) {
+	var c ChoiceItem
+	err := e.db.Pool.QueryRow(ctx, `
+		SELECT sys_id, table_id, element, value, label, sequence, is_active, dependent_value
+		FROM sys_choice WHERE sys_id = $1
+	`, choiceID).Scan(&c.SysID, &c.TableID, &c.Element, &c.Value, &c.Label, &c.Sequence, &c.IsActive, &c.DependentValue)
+	if err != nil {
+		return nil, fmt.Errorf("opção não encontrada: %w", err)
+	}
+	return &c, nil
+}
+
+// UpdateChoice updates a choice in sys_choice.
+func (e *Engine) UpdateChoice(ctx context.Context, choiceID uuid.UUID, label, value string, sequence int, isActive bool, userCtx *auth.SecurityContext) (*ChoiceItem, error) {
+	err := auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		cmd, err := tx.Exec(ctx, `
+			UPDATE sys_choice
+			SET label = $1, value = $2, sequence = $3, is_active = $4
+			WHERE sys_id = $5
+		`, label, value, sequence, isActive, choiceID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("opção não encontrada para atualização")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.GetChoice(ctx, choiceID)
+}
+
+// DeleteChoice removes a choice from sys_choice.
+func (e *Engine) DeleteChoice(ctx context.Context, choiceID uuid.UUID, userCtx *auth.SecurityContext) error {
+	return auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		cmd, err := tx.Exec(ctx, "DELETE FROM sys_choice WHERE sys_id = $1", choiceID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("opção não encontrada para exclusão")
+		}
+		return nil
+	})
+}
+

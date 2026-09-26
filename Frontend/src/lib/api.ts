@@ -145,13 +145,26 @@ export const api = {
   schema: {
     listTables: (includeKernel = false) =>
       request<TableInfo[]>(`/schema/tables?include_kernel=${includeKernel}`),
+    getTable: (idOrName: string) =>
+      request<TableInfo>(`/schema/tables/${idOrName}`),
     createTable: (payload: { name: string; label: string; super_class_id?: string | null; is_extendable?: boolean }) =>
       request<TableInfo>('/schema/tables', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    updateTable: (id: string, payload: { label?: string; is_extendable?: boolean }) =>
+      request<TableInfo>(`/schema/tables/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteTable: (id: string) =>
+      request<void>(`/schema/tables/${id}`, {
+        method: 'DELETE',
+      }),
     getFields: (tableName: string) =>
       request<FieldInfo[]>(`/schema/tables/${tableName}/fields`),
+    getField: (fieldId: string) =>
+      request<FieldInfo>(`/schema/fields/${fieldId}`),
     addField: (
       tableId: string,
       payload: {
@@ -172,12 +185,34 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    updateField: (fieldId: string, payload: { label?: string; is_mandatory?: boolean; is_read_only?: boolean; default_value?: string | null }) =>
+      request<FieldInfo>(`/schema/fields/${fieldId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteField: (fieldId: string) =>
+      request<void>(`/schema/fields/${fieldId}`, {
+        method: 'DELETE',
+      }),
     getChoices: (tableName: string, element: string) =>
       request<ChoiceInfo[]>(`/schema/choices/${tableName}/${element}`),
+    getTableChoices: (tableName: string) =>
+      request<ChoiceInfo[]>(`/schema/tables/${tableName}/choices`),
+    getChoice: (choiceId: string) =>
+      request<ChoiceInfo>(`/schema/choices/${choiceId}`),
     addChoice: (payload: { table_id: string; element: string; value: string; label: string; sequence?: number }) =>
       request<{ sys_id: string }>('/schema/choices', {
         method: 'POST',
         body: JSON.stringify(payload),
+      }),
+    updateChoice: (choiceId: string, payload: { label?: string; value?: string; sequence?: number; is_active?: boolean }) =>
+      request<ChoiceInfo>(`/schema/choices/${choiceId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteChoice: (choiceId: string) =>
+      request<void>(`/schema/choices/${choiceId}`, {
+        method: 'DELETE',
       }),
     configureNumber: (payload: { table_id: string; field_name?: string; prefix: string; minimum_digits?: number; start_number?: number }) =>
       request<any>('/schema/numbers', {
@@ -225,19 +260,115 @@ export const api = {
 
   fsm: {
     listTransitions: () => request<any[]>('/fsm/transitions'),
+    getTransition: (id: string) => request<any>(`/fsm/transitions/${id}`),
     createTransition: (payload: any) =>
       request<{ sys_id: string }>('/fsm/transitions', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    updateTransition: (id: string, payload: any) =>
+      request<any>(`/fsm/transitions/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteTransition: (id: string) =>
+      request<void>(`/fsm/transitions/${id}`, {
+        method: 'DELETE',
+      }),
   },
 
   rules: {
     listRules: () => request<any[]>('/rules/scripts'),
+    getRule: (id: string) => request<any>(`/rules/scripts/${id}`),
     createRule: (payload: any) =>
       request<{ sys_id: string }>('/rules/scripts', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    updateRule: (id: string, payload: any) =>
+      request<any>(`/rules/scripts/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteRule: (id: string) =>
+      request<void>(`/rules/scripts/${id}`, {
+        method: 'DELETE',
+      }),
+  },
+
+  rbac: {
+    users: {
+      list: () => request<any[]>('/rbac/users'),
+      get: (id: string) => request<any>(`/rbac/users/${id}`),
+      create: (payload: any) =>
+        request<{ sys_id: string }>('/rbac/users', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      update: (id: string, payload: any) =>
+        request<any>(`/rbac/users/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      delete: (id: string) =>
+        request<void>(`/rbac/users/${id}`, {
+          method: 'DELETE',
+        }),
+    },
+    groups: {
+      list: () => request<any[]>('/rbac/groups'),
+      get: (id: string) => request<any>(`/rbac/groups/${id}`),
+      create: (payload: any) =>
+        request<{ sys_id: string }>('/rbac/groups', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      update: (id: string, payload: any) =>
+        request<any>(`/rbac/groups/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      delete: (id: string) =>
+        request<void>(`/rbac/groups/${id}`, {
+          method: 'DELETE',
+        }),
+    },
+    roles: {
+      list: () => request<any[]>('/rbac/roles'),
+      get: (id: string) => request<any>(`/rbac/roles/${id}`),
+      create: (payload: any) =>
+        request<{ sys_id: string }>('/rbac/roles', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      update: (id: string, payload: any) =>
+        request<any>(`/rbac/roles/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      delete: (id: string) =>
+        request<void>(`/rbac/roles/${id}`, {
+          method: 'DELETE',
+        }),
+    },
+    permissions: {
+      list: () => request<any[]>('/rbac/permissions'),
+      get: (id: string) => request<any>(`/rbac/permissions/${id}`),
+      create: (payload: any) =>
+        request<{ sys_id: string }>('/rbac/permissions', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      update: (id: string, payload: any) =>
+        request<any>(`/rbac/permissions/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      delete: (id: string) =>
+        request<void>(`/rbac/permissions/${id}`, {
+          method: 'DELETE',
+        }),
+    },
   },
 };
+

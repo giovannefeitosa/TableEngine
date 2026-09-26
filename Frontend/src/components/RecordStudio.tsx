@@ -6,24 +6,19 @@ import {
   Database,
   Plus,
   Search,
-  Filter,
   RefreshCw,
   Edit3,
   Trash2,
   History,
   GitBranch,
   CheckCircle2,
-  AlertTriangle,
   ArrowRight,
   X,
-  Clock,
-  User,
-  Shield,
-  Layers,
   ChevronLeft,
   ChevronRight,
-  Eye,
-  SlidersHorizontal,
+  ArrowLeft,
+  Save,
+  Check,
 } from 'lucide-react';
 
 export function RecordStudio() {
@@ -39,9 +34,10 @@ export function RecordStudio() {
   const [loadingFields, setLoadingFields] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Active record detail / edit modal
+  // Active record page state (No Dialogs!)
   const [activeRecord, setActiveRecord] = useState<any | null>(null);
   const [isNewRecord, setIsNewRecord] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState<Record<string, any>>({});
   const [choicesCache, setChoicesCache] = useState<Record<string, { value: string; label: string }[]>>({});
 
@@ -89,7 +85,7 @@ export function RecordStudio() {
       setRecords(recordList.data || []);
       setTotalCount(recordList.meta?.total_count || 0);
 
-      // Load choices for dropdown fields (like 'state')
+      // Load choices for dropdown fields
       fieldList.forEach((f) => {
         if (f.column_name === 'state' || f.internal_type === 'string') {
           api.schema
@@ -113,10 +109,11 @@ export function RecordStudio() {
     }
   };
 
-  // Open Record Details
+  // Open Record Details Page
   const handleOpenRecord = async (record: any) => {
     setActiveRecord(record);
     setIsNewRecord(false);
+    setIsEditing(false);
     setFormData({ ...record });
     loadRecordTransitions(record);
   };
@@ -135,7 +132,7 @@ export function RecordStudio() {
     }
   };
 
-  // Open New Record Form
+  // Open New Record Form Page
   const handleNewRecord = () => {
     const initData: Record<string, any> = {};
     fields.forEach((f) => {
@@ -145,8 +142,16 @@ export function RecordStudio() {
     });
     setActiveRecord(null);
     setIsNewRecord(true);
+    setIsEditing(true);
     setFormData(initData);
     setAvailableTransitions([]);
+  };
+
+  // Close Record Details and Return to List
+  const handleBackToList = () => {
+    setActiveRecord(null);
+    setIsNewRecord(false);
+    setIsEditing(false);
   };
 
   // Save Record (Create or Update)
@@ -158,6 +163,7 @@ export function RecordStudio() {
         showToast('Registro criado com sucesso!');
         setActiveRecord(created);
         setIsNewRecord(false);
+        setIsEditing(false);
         setFormData({ ...created });
         loadRecordTransitions(created);
       } else {
@@ -167,12 +173,23 @@ export function RecordStudio() {
         });
         showToast('Registro atualizado com sucesso!');
         setActiveRecord(updated);
+        setIsEditing(false);
         setFormData({ ...updated });
         loadRecordTransitions(updated);
       }
       loadTableData(selectedTableName);
     } catch (err: any) {
       showToast(err.message);
+    }
+  };
+
+  // Cancel in-place editing
+  const handleCancelEdit = () => {
+    if (isNewRecord) {
+      handleBackToList();
+    } else {
+      setFormData({ ...activeRecord });
+      setIsEditing(false);
     }
   };
 
@@ -208,7 +225,7 @@ export function RecordStudio() {
     try {
       await api.records.delete(selectedTableName, activeRecord.sys_id);
       showToast('Registro excluído com sucesso!');
-      setActiveRecord(null);
+      handleBackToList();
       loadTableData(selectedTableName);
     } catch (err: any) {
       showToast(err.message);
@@ -230,11 +247,331 @@ export function RecordStudio() {
     }
   };
 
-  // Grid displayed columns: prioritize friendly columns
+  // Grid displayed columns
   const displayedCols = fields
     .filter((f) => !['sys_class_name', 'sys_updated_by', 'sys_created_by'].includes(f.column_name))
     .slice(0, 6);
 
+  // -------------------------------------------------------------
+  // VIEW: ENTITY DETAILS / FORM PAGE (Full Screen, No Dialog)
+  // -------------------------------------------------------------
+  if (activeRecord || isNewRecord) {
+    return (
+      <div className="space-y-6">
+        {/* Toast */}
+        {toast && (
+          <div className="fixed bottom-6 right-6 z-50 p-4 rounded-xl bg-slate-900 border border-brand-500/40 text-slate-100 text-xs shadow-2xl flex items-center space-x-3 animate-bounce">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span>{toast}</span>
+          </div>
+        )}
+
+        {/* Breadcrumb Navigation & Top Action Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={handleBackToList}
+              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 transition-colors"
+              title="Voltar para a listagem"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div>
+              <div className="flex items-center space-x-2.5">
+                <h2 className="text-xl font-bold text-white">
+                  {isNewRecord
+                    ? `Novo Registro em ${selectedTableName}`
+                    : `${activeRecord.number || activeRecord.sys_id}`}
+                </h2>
+                {!isNewRecord && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                    v{activeRecord.sys_mod_count}
+                  </span>
+                )}
+                {formData.state && (
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-brand-500/10 text-brand-300 border border-brand-500/30">
+                    {formData.state}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Tabela: <span className="font-mono text-slate-300">{selectedTableName}</span> • Concorrência Otimista & FSM Guard
+              </p>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex items-center space-x-2.5">
+            {!isNewRecord && !isEditing ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsEditing(true)}
+                  className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-glow-sm transition-all hover:scale-[1.02]"
+                >
+                  <Edit3 className="w-4 h-4" />
+                  <span>Editar Registro</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenAudit}
+                  className="flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium transition-colors"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Auditoria</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteRecord}
+                  className="flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-medium transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Excluir</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveRecord}
+                  className="flex items-center space-x-1.5 px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-glow-sm transition-all hover:scale-[1.02]"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>Salvar Alterações</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Dynamic FSM Action Buttons */}
+        {!isNewRecord && availableTransitions.length > 0 && !isEditing && (
+          <div className="glass-panel p-4 rounded-2xl border border-brand-500/30 space-y-2.5">
+            <div className="flex items-center space-x-2 text-xs text-brand-300 font-semibold">
+              <GitBranch className="w-4 h-4 text-brand-400" />
+              <span>Ações de Estado Disponíveis (FSM UI Actions):</span>
+            </div>
+            <div className="flex flex-wrap gap-2.5 pt-1">
+              {availableTransitions.map((t) => (
+                <button
+                  key={t.transition_id}
+                  type="button"
+                  onClick={() => handleExecuteTransition(t)}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white text-xs font-bold shadow-glow-sm flex items-center space-x-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <span>{t.label}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Entity Form: Strict Position Preservation between View and Edit Mode */}
+        <form onSubmit={handleSaveRecord} className="glass-panel rounded-2xl border border-slate-800 p-6 space-y-6">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800/80">
+            <h3 className="text-sm font-semibold text-white">
+              {isEditing ? 'Formulário de Edição' : 'Visualização do Registro'}
+            </h3>
+            <span className="text-[11px] text-slate-400 font-mono">
+              {isEditing ? 'Modo Interativo' : 'Modo Leitura (Clique em "Editar Registro" para alterar)'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 text-xs">
+            {fields.map((f) => {
+              const isSys = ['sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by', 'sys_mod_count', 'sys_class_name'].includes(f.column_name);
+              const isId = f.column_name === 'sys_id';
+              const isAutoNum = f.internal_type === 'auto_number';
+              const isFieldReadOnly = !isEditing || f.is_read_only || isSys || isId || isAutoNum;
+              const choices = choicesCache[f.column_name];
+              const val = formData[f.column_name] !== undefined ? formData[f.column_name] : '';
+
+              return (
+                <div
+                  key={f.column_name}
+                  className={f.internal_type === 'text' ? 'sm:col-span-2' : ''}
+                >
+                  <label className="block font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <span>{f.label}</span>
+                      {f.is_mandatory && isEditing && <span className="text-rose-400 font-bold">*</span>}
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {f.column_name}
+                    </span>
+                  </label>
+
+                  {/* Dropdown Options */}
+                  {choices && choices.length > 0 && !isFieldReadOnly ? (
+                    <select
+                      value={String(val)}
+                      onChange={(e) =>
+                        setFormData({ ...formData, [f.column_name]: e.target.value })
+                      }
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-brand-500 focus:outline-none"
+                    >
+                      <option value="">Selecione uma opção...</option>
+                      {choices.map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.label} ({c.value})
+                        </option>
+                      ))}
+                    </select>
+                  ) : f.internal_type === 'text' ? (
+                    <textarea
+                      rows={3}
+                      disabled={isFieldReadOnly}
+                      value={String(val)}
+                      onChange={(e) =>
+                        setFormData({ ...formData, [f.column_name]: e.target.value })
+                      }
+                      className={`w-full px-3.5 py-2.5 rounded-xl text-white font-sans transition-colors ${
+                        isFieldReadOnly
+                          ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                          : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
+                      }`}
+                    />
+                  ) : f.internal_type === 'boolean' ? (
+                    <div className="pt-2">
+                      <label className={`flex items-center space-x-2 text-slate-300 select-none ${isFieldReadOnly ? 'cursor-default' : 'cursor-pointer'}`}>
+                        <input
+                          type="checkbox"
+                          disabled={isFieldReadOnly}
+                          checked={Boolean(val)}
+                          onChange={(e) =>
+                            setFormData({ ...formData, [f.column_name]: e.target.checked })
+                          }
+                          className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-brand-500 focus:ring-0"
+                        />
+                        <span>{Boolean(val) ? 'Verdadeiro' : 'Falso'}</span>
+                      </label>
+                    </div>
+                  ) : (
+                    <input
+                      type={f.internal_type === 'integer' || f.internal_type === 'bigint' ? 'number' : 'text'}
+                      disabled={isFieldReadOnly}
+                      required={f.is_mandatory && isEditing && !isFieldReadOnly}
+                      value={isAutoNum && isNewRecord ? '(Gerado automaticamente pelo servidor)' : String(val)}
+                      onChange={(e) => {
+                        const v = f.internal_type === 'integer' || f.internal_type === 'bigint'
+                          ? Number(e.target.value)
+                          : e.target.value;
+                        setFormData({ ...formData, [f.column_name]: v });
+                      }}
+                      className={`w-full px-3.5 py-2.5 rounded-xl font-mono transition-colors ${
+                        isFieldReadOnly
+                          ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                          : 'bg-slate-900 border border-slate-700 text-white focus:border-brand-500 focus:outline-none'
+                      }`}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {isEditing && (
+            <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={handleCancelEdit}
+                className="px-4 py-2 rounded-xl text-slate-400 hover:text-white transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold shadow-glow-sm transition-all"
+              >
+                <Save className="w-4 h-4" />
+                <span>Salvar Registro</span>
+              </button>
+            </div>
+          )}
+        </form>
+
+        {/* Audit Drawer Sidepanel */}
+        {showAuditDrawer && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
+            <div className="w-full max-w-md bg-slate-900 border-l border-slate-800 p-6 flex flex-col justify-between shadow-2xl h-full animate-slide-left">
+              <div>
+                <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+                  <div className="flex items-center space-x-2">
+                    <History className="w-4 h-4 text-brand-400" />
+                    <span className="text-sm font-bold text-white">Trilha de Auditoria Universal</span>
+                  </div>
+                  <button
+                    onClick={() => setShowAuditDrawer(false)}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3 overflow-y-auto max-h-[calc(100vh-10rem)] pr-1">
+                  {loadingAudit ? (
+                    <p className="text-xs text-slate-400 text-center py-8">Carregando auditoria...</p>
+                  ) : auditEntries.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-8">Nenhuma alteração registrada em sys_audit para este registro.</p>
+                  ) : (
+                    auditEntries.map((a) => (
+                      <div key={a.sys_id} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs space-y-1.5 font-mono">
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 font-bold uppercase">
+                            {a.operation}
+                          </span>
+                          <span className="text-slate-500">{new Date(a.changed_on).toLocaleString()}</span>
+                        </div>
+                        <div className="text-slate-300 font-medium">
+                          Campo: <span className="text-white font-bold">{a.field_name}</span>
+                        </div>
+                        <div className="text-[11px] grid grid-cols-2 gap-2 pt-1 border-t border-slate-800/60">
+                          <div>
+                            <span className="text-rose-400">Antes:</span>{' '}
+                            <span className="text-slate-400">{JSON.stringify(a.old_value) || '-'}</span>
+                          </div>
+                          <div>
+                            <span className="text-emerald-400">Depois:</span>{' '}
+                            <span className="text-slate-200">{JSON.stringify(a.new_value) || '-'}</span>
+                          </div>
+                        </div>
+                        {a.changed_by && (
+                          <div className="text-[10px] text-slate-500 pt-1">
+                            Por: {a.changed_by.user_name}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-800">
+                <button
+                  onClick={() => setShowAuditDrawer(false)}
+                  className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold"
+                >
+                  Fechar Painel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // VIEW: RECORDS LIST (Default Table View)
+  // -------------------------------------------------------------
   return (
     <div className="space-y-6">
       {/* Toast */}
@@ -250,10 +587,10 @@ export function RecordStudio() {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
             <Database className="w-5 h-5 text-brand-400" />
-            <span>Record Studio (Dynamic Data Browser)</span>
+            <span>Record Studio (Navegador Dinâmico de Dados)</span>
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Explorador dinâmico de dados, formulários automáticos, ações de estado e trilha de auditoria.
+            Explorador dinâmico de dados, formulários automáticos dedicados por entidade, ações de estado e trilha de auditoria.
           </p>
         </div>
 
@@ -331,7 +668,7 @@ export function RecordStudio() {
                 </tr>
               ) : records.length === 0 ? (
                 <tr>
-                  <td colSpan={displayedCols.length + 1} className="py-12 text-center text-slate-400">
+                  <td colSpan={displayedCols.length + 1} className="py-12 text-center text-slate-400 font-sans">
                     Nenhum registro encontrado nesta tabela. Clique em "Novo Registro" para cadastrar!
                   </td>
                 </tr>
@@ -381,7 +718,7 @@ export function RecordStudio() {
                           }}
                           className="px-2.5 py-1 rounded bg-slate-800 hover:bg-brand-600 text-slate-300 hover:text-white transition-colors text-[11px] font-sans font-medium"
                         >
-                          Abrir
+                          Abrir Detalhes
                         </button>
                       </td>
                     </tr>
@@ -417,277 +754,6 @@ export function RecordStudio() {
           </div>
         </div>
       </div>
-
-      {/* Modal / Drawer: Form View & FSM State Actions */}
-      {(activeRecord || isNewRecord) && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="max-w-2xl w-full glass-panel rounded-2xl border border-slate-700 shadow-2xl p-6 space-y-6 my-8">
-            {/* Modal Top Header with Action Buttons */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-4">
-              <div>
-                <div className="flex items-center space-x-2">
-                  <span className="text-base font-bold text-white">
-                    {isNewRecord
-                      ? `Novo Registro em ${selectedTableName}`
-                      : `${activeRecord.number || activeRecord.sys_id}`}
-                  </span>
-                  {!isNewRecord && (
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                      v{activeRecord.sys_mod_count}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {selectedTableName} • Concorrência Otimista & FSM Guard
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                {!isNewRecord && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleOpenAudit}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center space-x-1.5 transition-colors"
-                    >
-                      <History className="w-3.5 h-3.5" />
-                      <span>Auditoria</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDeleteRecord}
-                      className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition-colors"
-                      title="Excluir Registro"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveRecord(null);
-                    setIsNewRecord(false);
-                  }}
-                  className="p-1.5 text-slate-400 hover:text-white"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* DYNAMIC FSM UI ACTION BUTTONS */}
-            {!isNewRecord && availableTransitions.length > 0 && (
-              <div className="p-3.5 rounded-xl bg-brand-950/40 border border-brand-500/30 space-y-2">
-                <div className="flex items-center space-x-2 text-xs text-brand-300 font-semibold">
-                  <GitBranch className="w-4 h-4 text-brand-400" />
-                  <span>Ações de Estado Disponíveis (UI Actions / FSM):</span>
-                </div>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {availableTransitions.map((t) => (
-                    <button
-                      key={t.transition_id}
-                      type="button"
-                      onClick={() => handleExecuteTransition(t)}
-                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white text-xs font-bold shadow-glow-sm flex items-center space-x-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
-                    >
-                      <span>{t.label}</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Form Fields Rendered Dynamically */}
-            <form onSubmit={handleSaveRecord} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {fields.map((f) => {
-                  const isSys = ['sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by', 'sys_mod_count', 'sys_class_name'].includes(f.column_name);
-                  const isId = f.column_name === 'sys_id';
-                  const isAutoNum = f.internal_type === 'auto_number';
-                  const isReadOnly = f.is_read_only || isSys || isId || isAutoNum;
-                  const choices = choicesCache[f.column_name];
-
-                  const val = formData[f.column_name] !== undefined ? formData[f.column_name] : '';
-
-                  return (
-                    <div
-                      key={f.column_name}
-                      className={f.internal_type === 'text' ? 'sm:col-span-2' : ''}
-                    >
-                      <label className="block font-semibold text-slate-300 mb-1 flex items-center justify-between">
-                        <span className="flex items-center gap-1.5">
-                          <span>{f.label}</span>
-                          {f.is_mandatory && <span className="text-rose-400 font-bold">*</span>}
-                        </span>
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          {f.column_name}
-                        </span>
-                      </label>
-
-                      {choices && choices.length > 0 && !isReadOnly ? (
-                        <select
-                          value={String(val)}
-                          onChange={(e) =>
-                            setFormData({ ...formData, [f.column_name]: e.target.value })
-                          }
-                          className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-brand-500 focus:outline-none"
-                        >
-                          <option value="">Selecione uma opção...</option>
-                          {choices.map((c) => (
-                            <option key={c.value} value={c.value}>
-                              {c.label} ({c.value})
-                            </option>
-                          ))}
-                        </select>
-                      ) : f.internal_type === 'text' ? (
-                        <textarea
-                          rows={3}
-                          disabled={isReadOnly}
-                          value={String(val)}
-                          onChange={(e) =>
-                            setFormData({ ...formData, [f.column_name]: e.target.value })
-                          }
-                          className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white disabled:opacity-50 focus:border-brand-500 focus:outline-none"
-                        />
-                      ) : f.internal_type === 'boolean' ? (
-                        <div className="pt-2">
-                          <label className="flex items-center space-x-2 text-slate-300 cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              disabled={isReadOnly}
-                              checked={Boolean(val)}
-                              onChange={(e) =>
-                                setFormData({ ...formData, [f.column_name]: e.target.checked })
-                              }
-                              className="rounded bg-slate-800 border-slate-700 text-brand-500 focus:ring-0"
-                            />
-                            <span>{Boolean(val) ? 'Verdadeiro' : 'Falso'}</span>
-                          </label>
-                        </div>
-                      ) : (
-                        <input
-                          type={f.internal_type === 'integer' || f.internal_type === 'bigint' ? 'number' : 'text'}
-                          disabled={isReadOnly}
-                          required={f.is_mandatory && !isReadOnly}
-                          value={isAutoNum && isNewRecord ? '(Gerado automaticamente pelo servidor)' : String(val)}
-                          onChange={(e) => {
-                            const v = f.internal_type === 'integer' || f.internal_type === 'bigint'
-                              ? Number(e.target.value)
-                              : e.target.value;
-                            setFormData({ ...formData, [f.column_name]: v });
-                          }}
-                          className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white disabled:opacity-50 focus:border-brand-500 focus:outline-none font-mono"
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveRecord(null);
-                    setIsNewRecord(false);
-                  }}
-                  className="px-4 py-2 rounded-xl text-slate-400 hover:text-white"
-                >
-                  Fechar
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold shadow-glow-sm transition-all"
-                >
-                  {isNewRecord ? 'Criar Registro' : 'Salvar Alterações'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* AUDIT TRAIL TIMELINE DRAWER */}
-      {showAuditDrawer && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end">
-          <div className="max-w-md w-full h-full glass-panel border-l border-slate-800 p-6 space-y-4 flex flex-col justify-between overflow-y-auto shadow-2xl">
-            <div>
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <History className="w-4 h-4 text-brand-400" />
-                  <span>Trilha de Auditoria (sys_audit)</span>
-                </h3>
-                <button onClick={() => setShowAuditDrawer(false)} className="text-slate-400 hover:text-white">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="mt-4 space-y-3">
-                {loadingAudit ? (
-                  <div className="py-12 text-center text-xs text-slate-400">
-                    Carregando histórico de auditoria...
-                  </div>
-                ) : auditEntries.length === 0 ? (
-                  <div className="py-8 text-center text-xs text-slate-400 glass-card rounded-xl">
-                    Nenhum registro de auditoria encontrado para este documento.
-                  </div>
-                ) : (
-                  auditEntries.map((a) => (
-                    <div
-                      key={a.sys_id}
-                      className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 text-xs space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span
-                          className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
-                            a.operation === 'INSERT'
-                              ? 'bg-emerald-500/10 text-emerald-400'
-                              : a.operation === 'UPDATE'
-                              ? 'bg-brand-500/10 text-brand-300'
-                              : 'bg-rose-500/10 text-rose-400'
-                          }`}
-                        >
-                          {a.operation} • {a.field_name}
-                        </span>
-                        <span className="text-slate-500 text-[10px]">
-                          {new Date(a.changed_on).toLocaleString()}
-                        </span>
-                      </div>
-
-                      {a.operation === 'UPDATE' && (
-                        <div className="grid grid-cols-2 gap-2 text-[10px] font-mono pt-1">
-                          <div className="p-1.5 rounded bg-slate-950/60 text-slate-400 truncate">
-                            <span className="text-rose-400 block font-sans">Anterior:</span>
-                            {JSON.stringify(a.old_value)}
-                          </div>
-                          <div className="p-1.5 rounded bg-slate-950/60 text-emerald-300 truncate">
-                            <span className="text-emerald-400 block font-sans">Novo:</span>
-                            {JSON.stringify(a.new_value)}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="pt-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-800/60">
-                        <span>Autor: <strong>{a.changed_by.user_name}</strong></span>
-                        <span className="text-slate-500 font-mono text-[9px]">{a.table_name}</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <button
-              onClick={() => setShowAuditDrawer(false)}
-              className="w-full py-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold"
-            >
-              Fechar Painel de Auditoria
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

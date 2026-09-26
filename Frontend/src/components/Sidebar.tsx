@@ -13,7 +13,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'schema' | 'records' | 'transitions' | 'rules' | 'audit' | 'quickstart';
+export type NavTab = 'dashboard' | 'schema' | 'records' | 'transitions' | 'rules' | 'rbac' | 'audit' | 'quickstart';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -53,6 +53,12 @@ export function Sidebar({ activeTab, onSelectTab, tableCount = 0 }: SidebarProps
       label: 'Regras de Negócio',
       icon: Code2,
       desc: 'Automações sys_script e scripts',
+    },
+    {
+      id: 'rbac',
+      label: 'Segurança & RBAC',
+      icon: ShieldCheck,
+      desc: 'Usuários, Grupos, Roles e ACLs',
     },
     {
       id: 'audit',

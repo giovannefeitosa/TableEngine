@@ -10,6 +10,7 @@ import { SchemaStudio } from '@/components/SchemaStudio';
 import { RecordStudio } from '@/components/RecordStudio';
 import { TransitionsStudio } from '@/components/TransitionsStudio';
 import { RulesStudio } from '@/components/RulesStudio';
+import { RbacStudio } from '@/components/RbacStudio';
 import { AuditView } from '@/components/AuditView';
 import { QuickstartTour } from '@/components/QuickstartTour';
 
@@ -67,6 +68,7 @@ export default function Home() {
           {activeTab === 'records' && <RecordStudio />}
           {activeTab === 'transitions' && <TransitionsStudio />}
           {activeTab === 'rules' && <RulesStudio />}
+          {activeTab === 'rbac' && <RbacStudio />}
           {activeTab === 'audit' && <AuditView />}
           {activeTab === 'quickstart' && <QuickstartTour />}
         </main>
