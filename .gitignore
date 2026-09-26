@@ -1,0 +1,5 @@
+*.zip
+.pgsql
+node_modules
+.next
+*.exe
