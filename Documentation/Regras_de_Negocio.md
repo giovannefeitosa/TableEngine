@@ -177,12 +177,30 @@ A resolução de regras é polimórfica:
 ## 8. Ciclo de Vida CRUD e Visualização em Página Própria de Detalhes
 
 * **Página Própria de Cada Regra:** No Rules Studio, clicar em qualquer regra de negócio ou em "Nova Regra" abre a página dedicada da entidade `sys_script`, eliminando diálogos sobrepostos.
-* **Edição In-Place na Mesma Tela:** A página de detalhes exibe todos os parâmetros (nome, tabela, timing, ordem de execução, modo de execução, usuário executor, tipo de ação, condição AST e payload da ação). O botão **"Editar"** permite modificar qualquer propriedade mantendo rigorosamente a mesma disposição visual na tela.
-* **Exclusão com Confirmação:** O botão **"Excluir"** permite revogar e expurgar a regra de negócio com confirmação e retorno instantâneo à listagem.
+* **Edição In-Place na Mesma Tela:** A página de detalhes exibe todos os parâmetros (nome, tabela, timing, ordem de execução, modo de execução, usuário executor, tipo de ação, condição AST e payload da ação). O botão **"Editar Regra"** permite modificar qualquer propriedade mantendo rigorosamente a mesma disposição visual na tela.
+* **Botão Split de Salvamento com Dropdown:**
+  * Durante a edição de uma regra de negócio existente, o botão **"Salvar Regra"** opera como um botão dividido (*split button*) com um gatilho dropdown (seta para baixo) à sua direita.
+  * O clique direto no botão principal executa a atualização in-place da regra atual (`PUT /api/v1/rules/scripts/:rule_id`).
+  * Ao clicar na seta dropdown, um menu contextual com duas opções avançadas é exibido:
+    1. **"Salvar como nova regra":**
+       * Clona as configurações em edição para um novo registro independente na tabela `sys_script` via `POST /api/v1/rules/scripts`, preservando a regra original completamente inalterada.
+       * Executa toda a validação de um novo registro:
+         * Validação de `name` obrigatório;
+         * Validação de existência da tabela alvo (`table_id`) no catálogo `sys_db_object`;
+         * Validação de momento de disparo (`timing` em `before_insert`, `before_update`, `after_insert`, `after_update`);
+         * Validação do modo de execução (`execution_mode`) e obrigatoriedade do usuário executor (`run_as_user_id`) ativo quando no modo `service`;
+         * Validação de conformidade estrutural da Árvore de Condições (AST JSONB);
+         * Validação dos campos obrigatórios do payload conforme o tipo de ação (`message` para `abort_transaction`, `field` para `set_field_value`, `script` para `execute_script`).
+       * Não interfere em outras funcionalidades ou regras existentes. Se qualquer regra ou restrição de validação for violada, a operação é interrompida com erro detalhado e o formulário permanece aberto com os dados intactos para correção.
+       * Em caso de sucesso, carrega a nova regra recém-criada em modo de visualização detalhada e atualiza a listagem geral.
+    2. **"Deletar":**
+       * Dispara um diálogo modal de confirmação contendo aviso de permanência, identificação da regra e opções explícitas de confirmação ("Cancelar" e "Sim, Excluir").
+       * Ao confirmar com "Sim, Excluir", executa `DELETE /api/v1/rules/scripts/:rule_id`, exibe notificação de sucesso e retorna instantaneamente para a listagem de regras.
+* **Exclusão com Confirmação Modal:** Tanto na visualização direta (botão "Excluir") quanto no menu dropdown do modo de edição (opção "Deletar"), a exclusão exige confirmação explícita via modal antes do expurgo físico da tupla no PostgreSQL.
 * **Contratos REST de Suporte:**
-  * `GET /api/v1/rules/scripts` (Listagem com filtros)
-  * `GET /api/v1/rules/scripts/:rule_id` (Consulta individual detalhada)
-  * `POST /api/v1/rules/scripts` (Criação com validação de AST)
-  * `PUT /api/v1/rules/scripts/:rule_id` (Atualização atômica in-place)
+  * `GET /api/v1/rules/scripts` (Listagem com filtros de tabela e pesquisa)
+  * `GET /api/v1/rules/scripts/:rule_id` (Consulta individual detalhada de atributos, AST e payload)
+  * `POST /api/v1/rules/scripts` (Criação de nova regra com validação completa de AST, integridade de atores e payload)
+  * `PUT /api/v1/rules/scripts/:rule_id` (Atualização atômica in-place com validação de campos alterados)
   * `DELETE /api/v1/rules/scripts/:rule_id` (Exclusão física com expurgo de trigger)
 
