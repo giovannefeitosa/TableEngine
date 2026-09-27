@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"tableengine/internal/audit"
 	"tableengine/internal/auth"
+	"tableengine/internal/condition"
 	"tableengine/internal/crud"
 	"tableengine/internal/database"
 	"tableengine/internal/ddl"
@@ -581,30 +583,127 @@ func (h *Handlers) CreateBusinessRule(w http.ResponseWriter, r *http.Request) {
 		ConditionExpression map[string]interface{} `json:"condition_expression"`
 		ActionType          string                 `json:"action_type"`
 		ActionPayload       map[string]interface{} `json:"action_payload"`
+		IsActive            *bool                  `json:"is_active"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "Payload inválido.")
 		return
 	}
-	if req.ExecutionMode == "" {
-		req.ExecutionMode = "caller"
+
+	if req.TableID == uuid.Nil {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "O campo 'table_id' é obrigatório.")
+		return
 	}
+
+	var tableExists bool
+	_ = h.db.Pool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM sys_db_object WHERE sys_id = $1)", req.TableID).Scan(&tableExists)
+	if !tableExists {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "A tabela informada não existe no catálogo.")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "O nome da regra de negócio é obrigatório.")
+		return
+	}
+
+	validTimings := map[string]bool{
+		"before_insert": true,
+		"before_update": true,
+		"after_insert":  true,
+		"after_update":  true,
+	}
+	if !validTimings[req.Timing] {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Timing inválido. Opções válidas: before_insert, before_update, after_insert, after_update.")
+		return
+	}
+
 	if req.ExecutionOrder <= 0 {
 		req.ExecutionOrder = 100
 	}
 
-	condJSON, _ := json.Marshal(req.ConditionExpression)
-	actionJSON, _ := json.Marshal(req.ActionPayload)
+	if req.ExecutionMode == "" {
+		req.ExecutionMode = "caller"
+	}
+	if req.ExecutionMode != "caller" && req.ExecutionMode != "service" {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Modo de execução inválido. Opções permitidas: caller, service.")
+		return
+	}
+
+	if req.ExecutionMode == "service" {
+		if req.RunAsUserID == nil || *req.RunAsUserID == uuid.Nil {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Para o modo 'service', o usuário executor (run_as_user_id) é obrigatório.")
+			return
+		}
+		var userExists bool
+		_ = h.db.Pool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM sys_user WHERE sys_id = $1 AND is_active = TRUE)", *req.RunAsUserID).Scan(&userExists)
+		if !userExists {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Usuário executor (run_as_user_id) não encontrado ou inativo.")
+			return
+		}
+	} else {
+		req.RunAsUserID = nil
+	}
+
+	validActionTypes := map[string]bool{
+		"set_field_value":   true,
+		"abort_transaction": true,
+		"execute_script":    true,
+	}
+	if !validActionTypes[req.ActionType] {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Tipo de ação inválido. Opções válidas: set_field_value, abort_transaction, execute_script.")
+		return
+	}
+
+	condJSON, err := json.Marshal(req.ConditionExpression)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Estrutura JSON da condição inválida.")
+		return
+	}
+	if len(req.ConditionExpression) > 0 {
+		if _, err := condition.ParseConditionTree(condJSON); err != nil {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", fmt.Sprintf("Árvore de condição (AST) inválida: %v", err))
+			return
+		}
+	}
+
+	actionJSON, err := json.Marshal(req.ActionPayload)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Payload da ação em formato JSON inválido.")
+		return
+	}
+	if req.ActionType == "abort_transaction" {
+		if req.ActionPayload == nil || req.ActionPayload["message"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["message"])) == "" {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Para ação 'abort_transaction', o campo 'message' é obrigatório no payload.")
+			return
+		}
+	} else if req.ActionType == "set_field_value" {
+		if req.ActionPayload == nil || req.ActionPayload["field"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["field"])) == "" {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Para ação 'set_field_value', o campo alvo ('field') é obrigatório no payload.")
+			return
+		}
+	} else if req.ActionType == "execute_script" {
+		if req.ActionPayload == nil || req.ActionPayload["script"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["script"])) == "" {
+			respondError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Para ação 'execute_script', o código 'script' é obrigatório no payload.")
+			return
+		}
+	}
+
+	isActive := true
+	if req.IsActive != nil {
+		isActive = *req.IsActive
+	}
 
 	var newID uuid.UUID
-	err := auth.ExecuteInTx(r.Context(), h.db, secCtx, func(tx pgx.Tx) error {
+	err = auth.ExecuteInTx(r.Context(), h.db, secCtx, func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(), `
 			INSERT INTO sys_script (
 				table_id, name, timing, execution_order, execution_mode,
-				run_as_user_id, condition_expression, action_type, action_payload
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				run_as_user_id, condition_expression, action_type, action_payload, is_active
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			RETURNING sys_id
-		`, req.TableID, req.Name, req.Timing, req.ExecutionOrder, req.ExecutionMode, req.RunAsUserID, condJSON, req.ActionType, actionJSON).Scan(&newID)
+		`, req.TableID, req.Name, req.Timing, req.ExecutionOrder, req.ExecutionMode, req.RunAsUserID, condJSON, req.ActionType, actionJSON, isActive).Scan(&newID)
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "RULE_CREATE_ERROR", err.Error())
@@ -1089,31 +1188,101 @@ func (h *Handlers) UpdateBusinessRule(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.TableID != nil && *req.TableID != uuid.Nil {
+			var tableExists bool
+			_ = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM sys_db_object WHERE sys_id = $1)", *req.TableID).Scan(&tableExists)
+			if !tableExists {
+				return errors.New("tabela especificada não foi encontrada")
+			}
 			curTableID = *req.TableID
 		}
-		if req.Name != nil && *req.Name != "" {
-			curName = *req.Name
+		if req.Name != nil {
+			trimmedName := strings.TrimSpace(*req.Name)
+			if trimmedName == "" {
+				return errors.New("o nome da regra de negócio é obrigatório")
+			}
+			curName = trimmedName
 		}
-		if req.Timing != nil && *req.Timing != "" {
+		if req.Timing != nil {
+			validTimings := map[string]bool{
+				"before_insert": true,
+				"before_update": true,
+				"after_insert":  true,
+				"after_update":  true,
+			}
+			if !validTimings[*req.Timing] {
+				return errors.New("timing inválido. Opções válidas: before_insert, before_update, after_insert, after_update")
+			}
 			curTiming = *req.Timing
 		}
 		if req.ExecutionOrder != nil {
+			if *req.ExecutionOrder <= 0 {
+				return errors.New("ordem de execução deve ser maior que zero")
+			}
 			curOrder = *req.ExecutionOrder
 		}
-		if req.ExecutionMode != nil && *req.ExecutionMode != "" {
+		if req.ExecutionMode != nil {
+			if *req.ExecutionMode != "caller" && *req.ExecutionMode != "service" {
+				return errors.New("modo de execução inválido. Opções válidas: caller, service")
+			}
 			curExecMode = *req.ExecutionMode
 		}
 		if req.RunAsUserID != nil {
 			curRunAs = req.RunAsUserID
 		}
-		if req.ConditionExpression != nil {
-			curCond, _ = json.Marshal(req.ConditionExpression)
+		if curExecMode == "service" {
+			if curRunAs == nil || *curRunAs == uuid.Nil {
+				return errors.New("para o modo 'service', o usuário executor (run_as_user_id) é obrigatório")
+			}
+			var userExists bool
+			_ = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM sys_user WHERE sys_id = $1 AND is_active = TRUE)", *curRunAs).Scan(&userExists)
+			if !userExists {
+				return errors.New("usuário executor (run_as_user_id) não encontrado ou inativo")
+			}
+		} else {
+			curRunAs = nil
 		}
-		if req.ActionType != nil && *req.ActionType != "" {
+		if req.ActionType != nil {
+			validActionTypes := map[string]bool{
+				"set_field_value":   true,
+				"abort_transaction": true,
+				"execute_script":    true,
+			}
+			if !validActionTypes[*req.ActionType] {
+				return errors.New("tipo de ação inválido. Opções válidas: set_field_value, abort_transaction, execute_script")
+			}
 			curActionType = *req.ActionType
 		}
+		if req.ConditionExpression != nil {
+			condB, err := json.Marshal(req.ConditionExpression)
+			if err != nil {
+				return errors.New("estrutura JSON da condição inválida")
+			}
+			if len(req.ConditionExpression) > 0 {
+				if _, err := condition.ParseConditionTree(condB); err != nil {
+					return fmt.Errorf("árvore de condição (AST) inválida: %w", err)
+				}
+			}
+			curCond = condB
+		}
 		if req.ActionPayload != nil {
-			curAction, _ = json.Marshal(req.ActionPayload)
+			actionB, err := json.Marshal(req.ActionPayload)
+			if err != nil {
+				return errors.New("payload da ação inválido")
+			}
+			if curActionType == "abort_transaction" {
+				if req.ActionPayload["message"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["message"])) == "" {
+					return errors.New("para 'abort_transaction', o campo 'message' é obrigatório no payload")
+				}
+			} else if curActionType == "set_field_value" {
+				if req.ActionPayload["field"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["field"])) == "" {
+					return errors.New("para 'set_field_value', o campo alvo ('field') é obrigatório no payload")
+				}
+			} else if curActionType == "execute_script" {
+				if req.ActionPayload["script"] == nil || strings.TrimSpace(fmt.Sprintf("%v", req.ActionPayload["script"])) == "" {
+					return errors.New("para 'execute_script', o código do script ('script') é obrigatório no payload")
+				}
+			}
+			curAction = actionB
 		}
 		if req.IsActive != nil {
 			curActive = *req.IsActive

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api, TableInfo } from '@/lib/api';
 import {
   Code2,
@@ -13,6 +13,9 @@ import {
   Search,
   RefreshCw,
   Terminal,
+  ChevronDown,
+  CopyPlus,
+  AlertTriangle,
 } from 'lucide-react';
 
 export function RulesStudio() {
@@ -27,6 +30,12 @@ export function RulesStudio() {
   const [activeRule, setActiveRule] = useState<any | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+
+  // Split-Button & Delete Confirmation States
+  const [activeDropdown, setActiveDropdown] = useState<'top' | 'bottom' | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Form State
   const [selectedTableID, setSelectedTableID] = useState('');
@@ -44,6 +53,21 @@ export function RulesStudio() {
     setToast(msg);
     setTimeout(() => setToast(null), 4000);
   };
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setActiveDropdown(null);
+      }
+    }
+    if (activeDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [activeDropdown]);
 
   const fetchRules = async () => {
     setLoading(true);
@@ -69,6 +93,8 @@ export function RulesStudio() {
   }, []);
 
   const handleOpenDetails = async (r: any) => {
+    setActiveDropdown(null);
+    setIsDeleteConfirmOpen(false);
     try {
       const full = await api.rules.getRule(r.sys_id);
       setActiveRule(full);
@@ -81,6 +107,8 @@ export function RulesStudio() {
   };
 
   const handleNewRule = () => {
+    setActiveDropdown(null);
+    setIsDeleteConfirmOpen(false);
     setActiveRule(null);
     setIsNew(true);
     setIsEditing(true);
@@ -118,12 +146,15 @@ export function RulesStudio() {
   };
 
   const handleBackToList = () => {
+    setActiveDropdown(null);
+    setIsDeleteConfirmOpen(false);
     setActiveRule(null);
     setIsNew(false);
     setIsEditing(false);
   };
 
   const handleCancelEdit = () => {
+    setActiveDropdown(null);
     if (isNew) {
       handleBackToList();
     } else {
@@ -132,52 +163,86 @@ export function RulesStudio() {
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      let parsedCond = null;
-      if (conditionJSON.trim()) {
-        try {
-          parsedCond = JSON.parse(conditionJSON);
-        } catch {
-          throw new Error('A condição deve ser um JSON válido (AST).');
-        }
-      }
-      let parsedAction = null;
-      if (actionPayloadJSON.trim()) {
-        try {
-          parsedAction = JSON.parse(actionPayloadJSON);
-        } catch {
-          throw new Error('O payload da ação deve ser um JSON válido.');
-        }
-      }
+  const validateFormAndGetPayload = () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      throw new Error('O nome da regra de negócio é obrigatório.');
+    }
+    if (!selectedTableID) {
+      throw new Error('Selecione a tabela alvo para a regra.');
+    }
 
-      const payload = {
-        table_id: selectedTableID,
-        name,
-        timing,
-        execution_order: Number(executionOrder),
-        execution_mode: executionMode,
-        run_as_user_id: executionMode === 'service' && runAsUserID.trim() ? runAsUserID.trim() : null,
-        action_type: actionType,
-        condition_expression: parsedCond,
-        action_payload: parsedAction,
-        is_active: isActive,
-      };
+    let parsedCond = null;
+    if (conditionJSON.trim()) {
+      try {
+        parsedCond = JSON.parse(conditionJSON);
+      } catch {
+        throw new Error('A condição deve ser um JSON válido (AST).');
+      }
+    }
+
+    let parsedAction = null;
+    if (actionPayloadJSON.trim()) {
+      try {
+        parsedAction = JSON.parse(actionPayloadJSON);
+      } catch {
+        throw new Error('O payload da ação deve ser um JSON válido.');
+      }
+    }
+
+    if (actionType === 'abort_transaction') {
+      if (!parsedAction || !parsedAction.message || !String(parsedAction.message).trim()) {
+        throw new Error('Para a ação "abort_transaction", o campo "message" é obrigatório no payload.');
+      }
+    } else if (actionType === 'set_field_value') {
+      if (!parsedAction || !parsedAction.field || !String(parsedAction.field).trim()) {
+        throw new Error('Para a ação "set_field_value", o campo alvo "field" é obrigatório no payload.');
+      }
+    } else if (actionType === 'execute_script') {
+      if (!parsedAction || !parsedAction.script || !String(parsedAction.script).trim()) {
+        throw new Error('Para a ação "execute_script", o código "script" é obrigatório no payload.');
+      }
+    }
+
+    if (executionMode === 'service' && !runAsUserID.trim()) {
+      throw new Error('Para o modo de execução "service", o usuário executor é obrigatório.');
+    }
+
+    return {
+      table_id: selectedTableID,
+      name: trimmedName,
+      timing,
+      execution_order: Number(executionOrder) || 100,
+      execution_mode: executionMode,
+      run_as_user_id: executionMode === 'service' && runAsUserID.trim() ? runAsUserID.trim() : null,
+      action_type: actionType,
+      condition_expression: parsedCond,
+      action_payload: parsedAction,
+      is_active: isActive,
+    };
+  };
+
+  const handleSave = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setActiveDropdown(null);
+    try {
+      const payload = validateFormAndGetPayload();
 
       if (isNew) {
         const res = await api.rules.createRule(payload);
-        showToast(`Regra '${name}' criada com sucesso!`);
+        showToast(`Regra '${payload.name}' criada com sucesso!`);
         const full = await api.rules.getRule(res.sys_id);
         setActiveRule(full);
         setIsNew(false);
         setIsEditing(false);
+        populateForm(full);
       } else {
         await api.rules.updateRule(activeRule.sys_id, payload);
-        showToast(`Regra '${name}' atualizada com sucesso!`);
+        showToast(`Regra '${payload.name}' atualizada com sucesso!`);
         const full = await api.rules.getRule(activeRule.sys_id);
         setActiveRule(full);
         setIsEditing(false);
+        populateForm(full);
       }
       fetchRules();
     } catch (err: any) {
@@ -185,19 +250,120 @@ export function RulesStudio() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!activeRule) return;
-    if (!confirm(`Confirma a exclusão da regra '${activeRule.name}'?`)) {
-      return;
+  const handleSaveAsNew = async () => {
+    setActiveDropdown(null);
+    try {
+      const payload = validateFormAndGetPayload();
+
+      const res = await api.rules.createRule(payload);
+      showToast(`Regra '${payload.name}' salva com sucesso como nova regra!`);
+      const full = await api.rules.getRule(res.sys_id);
+      setActiveRule(full);
+      setIsNew(false);
+      setIsEditing(false);
+      populateForm(full);
+      fetchRules();
+    } catch (err: any) {
+      showToast(err.message || 'Erro ao salvar como nova regra');
     }
+  };
+
+  const executeDelete = async () => {
+    if (!activeRule) return;
+    setDeleting(true);
     try {
       await api.rules.deleteRule(activeRule.sys_id);
       showToast('Regra excluída com sucesso!');
+      setIsDeleteConfirmOpen(false);
       handleBackToList();
       fetchRules();
     } catch (err: any) {
       showToast(err.message || 'Erro ao excluir regra');
+    } finally {
+      setDeleting(false);
     }
+  };
+
+  const renderSaveButtonGroup = (position: 'top' | 'bottom') => {
+    if (isNew) {
+      return (
+        <button
+          type="button"
+          onClick={handleSave}
+          className="flex items-center space-x-1.5 px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-glow-sm transition-all hover:scale-[1.02] active:scale-[0.98]"
+        >
+          <Save className="w-4 h-4" />
+          <span>Salvar Regra</span>
+        </button>
+      );
+    }
+
+    const isOpen = activeDropdown === position;
+
+    return (
+      <div className="relative inline-flex items-stretch rounded-xl shadow-glow-sm">
+        <button
+          type="button"
+          onClick={handleSave}
+          className="flex items-center space-x-1.5 px-4 py-2 rounded-l-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold transition-all hover:brightness-110 active:scale-[0.99]"
+          title="Salvar alterações na regra atual"
+        >
+          <Save className="w-4 h-4" />
+          <span>Salvar Regra</span>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setActiveDropdown(isOpen ? null : position);
+          }}
+          className="px-2.5 py-2 rounded-r-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold border-l border-brand-500/40 transition-all hover:brightness-110 flex items-center justify-center"
+          title="Mais opções"
+          aria-label="Opções de salvar regra"
+        >
+          <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {isOpen && (
+          <div
+            ref={dropdownRef}
+            onClick={(e) => e.stopPropagation()}
+            className={`absolute right-0 ${
+              position === 'bottom' ? 'bottom-full mb-2' : 'top-full mt-2'
+            } w-60 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-2xl backdrop-blur-xl p-1.5 z-50 animate-in fade-in zoom-in-95 duration-150`}
+          >
+            <button
+              type="button"
+              onClick={handleSaveAsNew}
+              className="w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg text-left text-xs text-slate-200 hover:text-white hover:bg-slate-800/80 transition-colors group"
+            >
+              <CopyPlus className="w-4 h-4 text-brand-400 group-hover:scale-110 transition-transform flex-shrink-0" />
+              <div>
+                <div className="font-semibold text-white">Salvar como nova regra</div>
+                <div className="text-[10px] text-slate-400 leading-tight">Cria um novo registro independente</div>
+              </div>
+            </button>
+
+            <div className="h-px bg-slate-800 my-1" />
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveDropdown(null);
+                setIsDeleteConfirmOpen(true);
+              }}
+              className="w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg text-left text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 transition-colors group"
+            >
+              <Trash2 className="w-4 h-4 text-rose-400 group-hover:scale-110 transition-transform flex-shrink-0" />
+              <div>
+                <div className="font-semibold text-rose-300">Deletar</div>
+                <div className="text-[10px] text-rose-400/70 leading-tight">Excluir esta regra permanentemente</div>
+              </div>
+            </button>
+          </div>
+        )}
+      </div>
+    );
   };
 
   // -------------------------------------------------------------
@@ -261,7 +427,7 @@ export function RulesStudio() {
                 </button>
                 <button
                   type="button"
-                  onClick={handleDelete}
+                  onClick={() => setIsDeleteConfirmOpen(true)}
                   className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-medium transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -277,14 +443,7 @@ export function RulesStudio() {
                 >
                   Cancelar
                 </button>
-                <button
-                  type="submit"
-                  onClick={handleSave}
-                  className="flex items-center space-x-1.5 px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-glow-sm transition-all hover:scale-[1.02]"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Salvar Regra</span>
-                </button>
+                {renderSaveButtonGroup('top')}
               </>
             )}
           </div>
@@ -475,16 +634,57 @@ export function RulesStudio() {
               >
                 Cancelar
               </button>
-              <button
-                type="submit"
-                className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold shadow-glow-sm transition-all"
-              >
-                <Save className="w-4 h-4" />
-                <span>Salvar Regra</span>
-              </button>
+              {renderSaveButtonGroup('bottom')}
             </div>
           )}
         </form>
+
+        {/* Modal de Confirmação de Exclusão */}
+        {isDeleteConfirmOpen && activeRule && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="glass-panel w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900/95 p-6 shadow-2xl space-y-5 animate-in zoom-in-95 duration-150">
+              <div className="flex items-center space-x-3.5">
+                <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 flex-shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Confirmar Exclusão</h3>
+                  <p className="text-xs text-slate-400">Esta ação é permanente e não poderá ser desfeita.</p>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-2">
+                <p>
+                  Tem certeza de que deseja excluir a regra de negócio{' '}
+                  <strong className="text-white font-semibold">"{activeRule.name}"</strong>?
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  Tabela: <span className="font-mono text-slate-300">{activeRule.table_name || tables.find((t) => t.sys_id === selectedTableID)?.name}</span> • Momento: <span className="font-mono text-slate-300">{activeRule.timing}</span>
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => setIsDeleteConfirmOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={executeDelete}
+                  className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 shadow-glow-rose transition-all hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{deleting ? 'Excluindo...' : 'Sim, Excluir'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
