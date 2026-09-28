@@ -107,6 +107,14 @@ A condição é uma **Abstract Syntax Tree (AST)** declarativa compatível com o
 }
 ```
 
+### 5.1 Integração com Colunas Referenciando `sys_state`
+Como o campo `state` (e qualquer outro que referencie `sys_state`) armazena fisicamente a chave estrangeira em formato UUID, a engine enriquece automaticamente o contexto de avaliação de condições:
+* `current.<campo>`: UUID canônico gravado no banco de dados.
+* `current.<campo>_name`: Nome técnico resolvido em `sys_state` (ex.: `'resolved'`, `'in_progress'`).
+* `current.<campo>_label`: Rótulo amigável oficial (ex.: `'Resolvido'`, `'Em Andamento'`).
+
+As expressões de comparação aceitam tanto a representação textual do status (`"resolved"`) quanto o UUID canônico do estado (`"30000000-0000-0000-0000-000000000004"`), garantindo flexibilidade na escrita declarativa sem comprometer a integridade relacional.
+
 ---
 
 ## 6. Ações Suportadas (`action_type` e `action_payload`)

@@ -107,6 +107,29 @@ CREATE TABLE sys_audit (
 CREATE INDEX idx_audit_doc ON sys_audit(table_name, document_id, changed_on);
 ```
 
+### 2.6 Catálogo de Estados do Ciclo de Vida (`sys_state`)
+Armazena a definição canônica de cada estado operacional da plataforma, com rótulos, sequência e cores:
+```sql
+CREATE TABLE sys_state (
+    sys_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_id UUID REFERENCES sys_db_object(sys_id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    label VARCHAR(80) NOT NULL,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    color VARCHAR(30) DEFAULT 'slate',
+    description TEXT,
+    sys_created_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_updated_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_created_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_updated_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_mod_count INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT uq_state_name_table UNIQUE (table_id, name)
+);
+
+CREATE INDEX idx_state_lookup ON sys_state(name, table_id) WHERE is_active = TRUE;
+```
+
 ---
 
 ## 3. Contrato da Tabela Raiz de Negócio (`super_class_id IS NULL`)
@@ -158,11 +181,15 @@ Ao adicionar uma coluna através da API ou UI (`POST /api/v1/schema/tables/:id/f
 | `integer` | `INTEGER` | 4 bytes | Severidade, prioridade, contadores inteiros |
 | `bigint` | `BIGINT` | 8 bytes | Contadores grandes, métricas de hardware |
 | `boolean` | `BOOLEAN` | `DEFAULT FALSE` | Flags (ex.: `active`, `vip_caller`) |
-| `reference` | `UUID` | `REFERENCES <ref_table>(sys_id) ON DELETE RESTRICT` | Vínculos a outras entidades (ex.: `caller_id`) |
+| `reference` | `UUID` | `REFERENCES <ref_table>(sys_id) ON DELETE RESTRICT` | Vínculos a outras entidades (ex.: `caller_id` -> `sys_user`, `state` -> `sys_state`) |
 | `auto_number` | `VARCHAR(22)` | `NOT NULL UNIQUE` (gerado por `sys_next_number`) | Identificador amigável (ex.: `TSK0000001`) |
 | `timestamptz` | `TIMESTAMPTZ` | Timestamp com timezone | Datas de vencimento, resolução, agendamentos |
 | `jsonb` | `JSONB` | `DEFAULT '{}'::jsonb` | Metadados extras não estruturados |
 | `uuid` | `UUID` | Chaves UUID avulsas | Identificadores externos |
+
+> [!IMPORTANT]
+> **Campo `state` da Tabela `tbl_task`:**
+> A coluna `state` em `tbl_task` é implementada formalmente como `internal_type = 'reference'` com `reference_table_id` apontando para a tabela `sys_state`. No banco físico, seu tipo é `UUID REFERENCES sys_state(sys_id) ON DELETE RESTRICT`. A Máquina de Estados Finita (FSM) intercepta e controla rigorosamente qualquer coluna que possua esta referência a `sys_state`.
 
 ---
 

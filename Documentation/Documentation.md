@@ -223,7 +223,7 @@ BEGIN
         'sys\_db\_object','sys\_dictionary','sys\_choice','sys\_user','sys\_user\_group',  
         'sys\_user\_role','sys\_permission','sys\_user\_grmember','sys\_group\_has\_role',  
         'sys\_role\_has\_permission','sys\_number','sys\_number\_counter',  
-        'sys\_script','sys\_state\_transition'  
+        'sys\_state','sys\_script','sys\_state\_transition'  
     \] LOOP  
         EXECUTE format('ALTER TABLE %I  
             ADD COLUMN IF NOT EXISTS sys\_created\_on TIMESTAMPTZ DEFAULT clock\_timestamp(),  
@@ -798,107 +798,100 @@ CREATE TABLE sys\_script (
 
 ## **9\. Máquina de Estados e Ciclo de Vida Polimórfico (State Transitions)**
 
-Para impedir movimentações arbitrárias de status (ex.: mover um chamado direto de *Novo* para *Fechado* sem passar por *Resolvido* ou sem autorização), a engine incorpora uma Máquina de Estados Finita (FSM) orientada a metadados.
+Para impedir movimentações arbitrárias de status (ex.: mover um chamado direto de *Novo* para *Fechado* sem passar por *Resolvido* ou sem autorização), a engine incorpora uma Máquina de Estados Finita (FSM) declarativa e orientada a metadados.
 
-### **9.1 Catálogo de Transições (`sys_state_transition`)**
+A FSM é **estritamente atrelada à tabela `sys_state`**. Esta tabela armazena os rótulos de cada status (`label`), seus nomes técnicos (`name`), ordenação e cores. A máquina de estados controla especificamente **qualquer coluna no catálogo que seja uma referência (`internal_type = 'reference'`) para `sys_state`** — incluindo compulsoriamente a coluna `state` da tabela raiz `tbl_task`.
 
-CREATE TABLE sys\_state\_transition (
+### **9.1 Catálogo Central de Estados (`sys_state`)**
 
+CREATE TABLE sys\_state (
     sys\_id UUID PRIMARY KEY DEFAULT gen\_random\_uuid(),
-
-    table\_id UUID NOT NULL REFERENCES sys\_db\_object(sys\_id) ON DELETE CASCADE,
-
-    state\_field VARCHAR(80) DEFAULT 'state',       \-- Campo que abriga o ciclo (permite outros campos como 'approval\_state')
-
-    from\_state VARCHAR(50) NOT NULL,               \-- Valor de origem (ex: 'new', '1')
-
-    to\_state VARCHAR(50) NOT NULL,                 \-- Valor de destino (ex: 'in\_progress', '2')
-
-    label VARCHAR(80),                             \-- Texto para botão/ação na UI (ex: 'Iniciar Atendimento')
-
-    required\_role\_id UUID REFERENCES sys\_user\_role(sys\_id) ON DELETE RESTRICT, \-- Role adicional exigida; NULL dispensa apenas esta checagem
-
-    condition\_tree JSONB,                          \-- Regras adicionais necessárias para liberar a transição
-
-    on\_transition\_action JSONB,                    \-- Ações de efeito colateral automáticas (ex: carimbar resolved\_at)
-
-    is\_active BOOLEAN DEFAULT TRUE,
-
-    sys\_created\_on TIMESTAMPTZ DEFAULT clock\_timestamp(),
-
-    CONSTRAINT uq\_state\_transition UNIQUE (table\_id, state\_field, from\_state, to\_state)
-
+    table\_id UUID REFERENCES sys\_db\_object(sys\_id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    label VARCHAR(80) NOT NULL,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    color VARCHAR(30) DEFAULT 'slate',
+    description TEXT,
+    sys_created_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_updated_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_created_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_updated_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_mod_count INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT uq_state_name_table UNIQUE (table_id, name)
 );
 
-CREATE INDEX idx\_transition\_lookup 
+CREATE INDEX idx_state_lookup ON sys_state(name, table_id) WHERE is_active = TRUE;
 
-ON sys\_state\_transition(table\_id, state\_field, from\_state, to\_state) 
+Os estados padrão do sistema (`draft`, `new`, `in_progress`, `resolved`, `closed`, `canceled`) são provisionados no bootstrap com UUIDs determinísticos de `30000000-0000-0000-0000-000000000001` a `...0006`.
 
+### **9.2 Catálogo de Transições (`sys_state_transition`)**
+
+CREATE TABLE sys\_state\_transition (
+    sys\_id UUID PRIMARY KEY DEFAULT gen\_random\_uuid(),
+    table\_id UUID NOT NULL REFERENCES sys\_db\_object(sys\_id) ON DELETE CASCADE,
+    state\_field VARCHAR(80) DEFAULT 'state',       \-- Campo que referencia sys_state
+    from\_state\_id UUID NOT NULL REFERENCES sys\_state(sys\_id) ON DELETE CASCADE,
+    to\_state\_id UUID NOT NULL REFERENCES sys\_state(sys\_id) ON DELETE CASCADE,
+    from\_state VARCHAR(50),                       \-- Nome de origem sincronizado
+    to\_state VARCHAR(50),                         \-- Nome de destino sincronizado
+    label VARCHAR(80),                             \-- Rótulo do botão/ação na UI (ex: 'Iniciar Atendimento')
+    required\_role\_id UUID REFERENCES sys\_user\_role(sys\_id) ON DELETE RESTRICT,
+    condition\_tree JSONB,                          \-- Regras adicionais necessárias para liberar a transição
+    on\_transition\_action JSONB,                    \-- Mutações atômicas de efeito colateral
+    is\_active BOOLEAN DEFAULT TRUE,
+    sys\_created\_on TIMESTAMPTZ DEFAULT clock\_timestamp(),
+    sys\_updated\_on TIMESTAMPTZ DEFAULT clock\_timestamp(),
+    sys\_created\_by UUID REFERENCES sys\_user(sys\_id) ON DELETE RESTRICT,
+    sys\_updated\_by UUID REFERENCES sys\_user(sys\_id) ON DELETE RESTRICT,
+    sys\_mod\_count INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT uq\_state\_transition\_ids UNIQUE (table\_id, state\_field, from\_state\_id, to\_state\_id)
+);
+
+CREATE INDEX idx\_transition\_ids\_lookup 
+ON sys\_state\_transition(table\_id, state\_field, from\_state\_id, to\_state\_id) 
 WHERE is\_active \= TRUE;
 
-required\_role\_id usa a chave UUID da role, com FK que impede referências inexistentes. O nome técnico aparece somente na configuração e na exibição. A ausência de role adicional não dispensa as permissões update e execute da transição. Cada transição tem action\_name determinístico: transition:\<from\_state\>:\<to\_state\>, associado ao table\_id concreto em sys\_permission.
+required\_role\_id usa a chave UUID da role, com FK que impede referências inexistentes. Cada transição tem action\_name determinístico: `transition:<from_state_name>:<to_state_name>`, associado ao table\_id concreto em sys\_permission.
 
-### **9.2 Resolução Polimórfica de Transições com Herança**
+### **9.3 Modelagem da Coluna `state` em `tbl_task`**
 
-Como estamos utilizando **Table-per-Type (TPT)**, uma tabela filha (ex.: `tbl_incident`) herda o campo `state` definido na tabela pai (`tbl_task`). No entanto, o fluxo de vida pode ser diferente:
+A coluna `state` em `tbl_task` é tipada fisicamente como `UUID REFERENCES sys_state(sys_id)` com valor padrão apontando para o status `new` (`30000000-0000-0000-0000-000000000002`). No `sys_dictionary`, seu tipo é registrado formalmente como `internal_type = 'reference'` com `reference_table_id = sys_state.sys_id`. A FSM detecta dinamicamente através do dicionário qualquer atributo que referencie `sys_state` e valida todas as mudanças de valor contra as transições cadastradas.
 
-* Uma tarefa genérica pode ter: `Novo -> Fechado`.  
-* Um incidente específico exige: `Novo -> Em Andamento -> Resolvido -> Fechado`.
+### **9.4 Resolução Polimórfica de Transições com Herança e Labels**
 
-A engine aplica a seguinte ordem de precedência:
-
-1. **Busca na tabela concreta:** Procura transições configuradas especificamente para `tbl_incident`.  
-2. **Fallback para Ancestrais:** Caso não haja nenhuma transição customizada na tabela filha, a engine recorre recursivamente à árvore genealógica de `sys_db_object` até encontrar as transições da classe base.
-
-\-- Query para recuperar transições ativas considerando hierarquia de classes
+Como estamos utilizando **Table-per-Type (TPT)**, uma tabela filha (ex.: `tbl_incident`) herda o campo `state` definido na tabela pai (`tbl_task`). A engine aplica precedência através da CTE recursiva, enriquecendo as transições com os rótulos de `sys_state`:
 
 WITH RECURSIVE table\_lineage AS (
-
     SELECT sys\_id, name, super\_class\_id, 0 AS depth
-
     FROM sys\_db\_object
-
     WHERE name \= 'tbl\_incident'
-
-    
 
     UNION ALL
 
-    
-
     SELECT parent.sys\_id, parent.name, parent.super\_class\_id, tl.depth \+ 1
-
     FROM sys\_db\_object parent
-
     JOIN table\_lineage tl ON tl.super\_class\_id \= parent.sys\_id
-
 )
-
-SELECT DISTINCT ON (st.from\_state, st.to\_state)
-
+SELECT DISTINCT ON (st.from\_state\_id, st.to\_state\_id)
     st.sys\_id,
-
-    st.from\_state,
-
-    st.to\_state,
-
+    st.from\_state\_id,
+    COALESCE(fs.name, st.from\_state, '') AS from\_state,
+    COALESCE(fs.label, st.from\_state, '') AS from\_state\_label,
+    st.to\_state\_id,
+    COALESCE(ts.name, st.to\_state, '') AS to\_state,
+    COALESCE(ts.label, st.to\_state, '') AS to\_state\_label,
     st.label,
-
     st.required\_role\_id,
-
     st.condition\_tree,
-
     tl.name AS defined\_in\_table,
-
     tl.depth
-
 FROM table\_lineage tl
-
 JOIN sys\_state\_transition st ON st.table\_id \= tl.sys\_id
-
+LEFT JOIN sys\_state fs ON fs.sys\_id \= st.from\_state\_id
+LEFT JOIN sys\_state ts ON ts.sys\_id \= st.to\_state\_id
 WHERE st.state\_field \= 'state' AND st.is\_active \= TRUE
-
-ORDER BY st.from\_state, st.to\_state, tl.depth ASC;
+ORDER BY st.from\_state\_id, st.to\_state\_id, tl.depth ASC;
 
 A herança seleciona a definição de transição, mas não concede acesso. Mesmo quando a definição vem de task, a autorização é avaliada para a classe concreta do registro (por exemplo, tbl\_incident), usando suas permissões explícitas e as roles herdadas dos grupos do usuário.
 

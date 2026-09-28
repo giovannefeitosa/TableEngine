@@ -524,29 +524,97 @@ Esta especificação define todos os contratos HTTP da API REST do **TableEngine
 
 ---
 
-## 8. CRUD de Transições FSM e Regras de Negócio
+## 8. CRUD de Estados FSM, Transições e Regras de Negócio
 
-### 8.1 FSM State Transitions (`/fsm/transitions`)
-* **Listar:** `GET /api/v1/fsm/transitions`
+### 8.1 Catálogo de Estados FSM (`/fsm/states`)
+* **Listar Estados:** `GET /api/v1/fsm/states`
+  * **Query Params:** `table_id` (opcional: filtra estados globais e específicos da tabela).
+  * **Response (200 OK):**
+    ```json
+    [
+      {
+        "sys_id": "30000000-0000-0000-0000-000000000002",
+        "table_id": null,
+        "table_name": "",
+        "name": "new",
+        "label": "Novo",
+        "sequence": 20,
+        "is_active": true,
+        "color": "blue",
+        "description": "Estado inicial para registros recém-submetidos",
+        "sys_created_on": "2026-09-27T12:00:00Z"
+      }
+    ]
+    ```
+* **Obter Detalhes do Estado:** `GET /api/v1/fsm/states/:state_id`
+* **Criar Estado:** `POST /api/v1/fsm/states`
+  * **Request Body:**
+    ```json
+    {
+      "table_id": null,
+      "name": "qa_review",
+      "label": "Revisão de Qualidade",
+      "sequence": 35,
+      "is_active": true,
+      "color": "emerald",
+      "description": "Aguardando validação formal de QA"
+    }
+    ```
+  * **Response (201 Created):** `{ "sys_id": "..." }`
+* **Atualizar Estado:** `PUT /api/v1/fsm/states/:state_id`
+  * **Request Body:**
+    ```json
+    {
+      "label": "Revisão Concluída",
+      "sequence": 36,
+      "is_active": true,
+      "color": "teal",
+      "description": "Revisão efetuada"
+    }
+    ```
+* **Excluir Estado:** `DELETE /api/v1/fsm/states/:state_id` (200 OK ou 204 No Content; bloqueado se houver FK em transições ativas)
+
+### 8.2 FSM State Transitions (`/fsm/transitions`)
+* **Listar Transições:** `GET /api/v1/fsm/transitions`
+  * **Response (200 OK):**
+    ```json
+    [
+      {
+        "sys_id": "471506b0-5985-4d50-842e-90c7fff69264",
+        "table_id": "22222222-2222-2222-2222-222222222222",
+        "table_name": "tbl_incident",
+        "from_state_id": "30000000-0000-0000-0000-000000000002",
+        "from_state": "new",
+        "from_state_label": "Novo",
+        "to_state_id": "30000000-0000-0000-0000-000000000003",
+        "to_state": "in_progress",
+        "to_state_label": "Em Andamento",
+        "label": "Iniciar Atendimento",
+        "is_active": true
+      }
+    ]
+    ```
 * **Obter Detalhes:** `GET /api/v1/fsm/transitions/:transition_id`
-* **Criar:** `POST /api/v1/fsm/transitions`
+* **Criar Transição:** `POST /api/v1/fsm/transitions`
+  * Aceita tanto `from_state_id` / `to_state_id` (UUIDs) quanto `from_state` / `to_state` (nomes resolvidos em `sys_state`).
+  * **Request Body:**
+    ```json
+    {
+      "table_id": "22222222-2222-2222-2222-222222222222",
+      "state_field": "state",
+      "from_state_id": "30000000-0000-0000-0000-000000000002",
+      "to_state_id": "30000000-0000-0000-0000-000000000003",
+      "label": "Iniciar Atendimento",
+      "required_role_id": "44444444-4444-4444-4444-444444444444",
+      "condition_tree": { "operator": "AND", "rules": [] },
+      "on_transition_action": { "set_fields": { "work_notes": "Iniciado" } },
+      "is_active": true
+    }
+    ```
 * **Atualizar:** `PUT /api/v1/fsm/transitions/:transition_id`
-  ```json
-  {
-    "table_id": "22222222-2222-2222-2222-222222222222",
-    "state_field": "state",
-    "from_state": "in_progress",
-    "to_state": "resolved",
-    "label": "Resolver Chamado",
-    "required_role_id": "44444444-4444-4444-4444-444444444444",
-    "condition_tree": { "operator": "AND", "rules": [] },
-    "on_transition_action": { "set_fields": { "resolved_at": "$NOW" } },
-    "is_active": true
-  }
-  ```
 * **Excluir:** `DELETE /api/v1/fsm/transitions/:transition_id` (204 No Content)
 
-### 8.2 Business Rules (`/rules/scripts`)
+### 8.3 Business Rules (`/rules/scripts`)
 * **Listar:** `GET /api/v1/rules/scripts`
 * **Obter Detalhes:** `GET /api/v1/rules/scripts/:rule_id`
 * **Criar:** `POST /api/v1/rules/scripts`
