@@ -184,22 +184,48 @@ CREATE TABLE IF NOT EXISTS sys_script (
 );
 CREATE INDEX IF NOT EXISTS idx_script_execution ON sys_script(table_id, timing, execution_order) WHERE is_active = TRUE;
 
--- 8. FSM State Transitions
+-- 8. Status & States Catalog (FSM)
+CREATE TABLE IF NOT EXISTS sys_state (
+    sys_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_id UUID REFERENCES sys_db_object(sys_id) ON DELETE CASCADE,
+    name VARCHAR(80) NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    color VARCHAR(40) DEFAULT 'gray',
+    description TEXT,
+    sys_created_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_updated_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_created_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_updated_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_mod_count INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT uq_state_table_name UNIQUE (table_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_state_lookup ON sys_state(table_id, name) WHERE is_active = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sys_state_global_name ON sys_state(name) WHERE table_id IS NULL;
+
+-- 9. FSM State Transitions
 CREATE TABLE IF NOT EXISTS sys_state_transition (
     sys_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     table_id UUID NOT NULL REFERENCES sys_db_object(sys_id) ON DELETE CASCADE,
     state_field VARCHAR(80) NOT NULL DEFAULT 'state',
-    from_state VARCHAR(50) NOT NULL,
-    to_state VARCHAR(50) NOT NULL,
+    from_state_id UUID NOT NULL REFERENCES sys_state(sys_id) ON DELETE CASCADE,
+    to_state_id UUID NOT NULL REFERENCES sys_state(sys_id) ON DELETE CASCADE,
+    from_state VARCHAR(80),
+    to_state VARCHAR(80),
     label VARCHAR(80) NOT NULL,
     required_role_id UUID REFERENCES sys_user_role(sys_id) ON DELETE RESTRICT,
     condition_tree JSONB,
     on_transition_action JSONB,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     sys_created_on TIMESTAMPTZ DEFAULT clock_timestamp(),
-    CONSTRAINT uq_state_transition UNIQUE (table_id, state_field, from_state, to_state)
+    sys_updated_on TIMESTAMPTZ DEFAULT clock_timestamp(),
+    sys_created_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_updated_by UUID REFERENCES sys_user(sys_id) ON DELETE RESTRICT,
+    sys_mod_count INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT uq_state_transition UNIQUE (table_id, state_field, from_state_id, to_state_id)
 );
-CREATE INDEX IF NOT EXISTS idx_transition_lookup ON sys_state_transition(table_id, state_field, from_state, to_state) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_transition_lookup ON sys_state_transition(table_id, state_field, from_state_id, to_state_id) WHERE is_active = TRUE;
 `
 
 // FunctionsAndTriggersDDL contains PL/pgSQL functions for audit and numbering.

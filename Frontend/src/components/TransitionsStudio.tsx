@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { api, TableInfo } from '@/lib/api';
+import { api, TableInfo, StateItem } from '@/lib/api';
 import {
   GitBranch,
   Plus,
@@ -19,6 +19,7 @@ import {
 export function TransitionsStudio() {
   const [transitions, setTransitions] = useState<any[]>([]);
   const [tables, setTables] = useState<TableInfo[]>([]);
+  const [states, setStates] = useState<StateItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -47,12 +48,14 @@ export function TransitionsStudio() {
   const fetchTransitions = async () => {
     setLoading(true);
     try {
-      const [tList, tblList] = await Promise.all([
+      const [tList, tblList, stList] = await Promise.all([
         api.fsm.listTransitions(),
         api.schema.listTables(false),
+        api.fsm.listStates(),
       ]);
       setTransitions(tList || []);
       setTables(tblList || []);
+      setStates(stList || []);
       if (tblList.length > 0 && !selectedTableID) {
         setSelectedTableID(tblList[0].sys_id);
       }
@@ -84,8 +87,13 @@ export function TransitionsStudio() {
     setIsNew(true);
     setIsEditing(true);
     setSelectedTableID(tables.length > 0 ? tables[0].sys_id : '');
-    setFromState('new');
-    setToState('in_progress');
+    if (states.length >= 2) {
+      setFromState(states[1].name); // 'new'
+      setToState(states[2].name);   // 'in_progress'
+    } else {
+      setFromState('new');
+      setToState('in_progress');
+    }
     setLabel('');
     setRequiredRoleID('');
     setIsActive(true);
@@ -95,8 +103,8 @@ export function TransitionsStudio() {
 
   const populateForm = (data: any) => {
     setSelectedTableID(data.table_id || '');
-    setFromState(data.from_state || '');
-    setToState(data.to_state || '');
+    setFromState(data.from_state || data.from_state_id || '');
+    setToState(data.to_state || data.to_state_id || '');
     setLabel(data.label || '');
     setRequiredRoleID(data.required_role_id || '');
     setIsActive(data.is_active ?? true);
@@ -330,38 +338,76 @@ export function TransitionsStudio() {
 
             {/* From State */}
             <div>
-              <label className="block font-semibold text-slate-300 mb-1.5">Estado de Origem (from_state) *</label>
-              <input
-                type="text"
-                required
-                disabled={!isEditing}
-                value={fromState}
-                onChange={(e) => setFromState(e.target.value)}
-                placeholder="Ex: in_progress"
-                className={`w-full px-3.5 py-2.5 rounded-xl font-mono text-white transition-colors ${
-                  !isEditing
-                    ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
-                    : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
-                }`}
-              />
+              <label className="block font-semibold text-slate-300 mb-1.5">Estado de Origem (sys_state) *</label>
+              {states.length > 0 ? (
+                <select
+                  disabled={!isEditing}
+                  value={fromState}
+                  onChange={(e) => setFromState(e.target.value)}
+                  className={`w-full px-3.5 py-2.5 rounded-xl font-sans text-white transition-colors ${
+                    !isEditing
+                      ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                      : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
+                  }`}
+                >
+                  {states.map((s) => (
+                    <option key={s.sys_id} value={s.name}>
+                      {s.label} ({s.name})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  disabled={!isEditing}
+                  value={fromState}
+                  onChange={(e) => setFromState(e.target.value)}
+                  placeholder="Ex: new"
+                  className={`w-full px-3.5 py-2.5 rounded-xl font-mono text-white transition-colors ${
+                    !isEditing
+                      ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                      : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
+                  }`}
+                />
+              )}
             </div>
 
             {/* To State */}
             <div>
-              <label className="block font-semibold text-slate-300 mb-1.5">Estado de Destino (to_state) *</label>
-              <input
-                type="text"
-                required
-                disabled={!isEditing}
-                value={toState}
-                onChange={(e) => setToState(e.target.value)}
-                placeholder="Ex: resolved"
-                className={`w-full px-3.5 py-2.5 rounded-xl font-mono text-white transition-colors ${
-                  !isEditing
-                    ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
-                    : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
-                }`}
-              />
+              <label className="block font-semibold text-slate-300 mb-1.5">Estado de Destino (sys_state) *</label>
+              {states.length > 0 ? (
+                <select
+                  disabled={!isEditing}
+                  value={toState}
+                  onChange={(e) => setToState(e.target.value)}
+                  className={`w-full px-3.5 py-2.5 rounded-xl font-sans text-white transition-colors ${
+                    !isEditing
+                      ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                      : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
+                  }`}
+                >
+                  {states.map((s) => (
+                    <option key={s.sys_id} value={s.name}>
+                      {s.label} ({s.name})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  disabled={!isEditing}
+                  value={toState}
+                  onChange={(e) => setToState(e.target.value)}
+                  placeholder="Ex: in_progress"
+                  className={`w-full px-3.5 py-2.5 rounded-xl font-mono text-white transition-colors ${
+                    !isEditing
+                      ? 'bg-slate-900/60 border border-slate-800 text-slate-300 cursor-default'
+                      : 'bg-slate-900 border border-slate-700 focus:border-brand-500 focus:outline-none'
+                  }`}
+                />
+              )}
             </div>
 
             {/* Required Role ID */}
@@ -581,12 +627,12 @@ export function TransitionsStudio() {
                     </td>
                     <td className="py-3.5 px-4">
                       <div className="flex items-center space-x-2">
-                        <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px]">
-                          {t.from_state}
+                        <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-sans text-[11px] font-medium">
+                          {t.from_state_label ? `${t.from_state_label} (${t.from_state})` : t.from_state}
                         </span>
                         <ArrowRight className="w-3 h-3 text-slate-500" />
-                        <span className="px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 font-mono text-[11px] font-bold">
-                          {t.to_state}
+                        <span className="px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 font-sans text-[11px] font-bold">
+                          {t.to_state_label ? `${t.to_state_label} (${t.to_state})` : t.to_state}
                         </span>
                       </div>
                     </td>

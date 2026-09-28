@@ -501,7 +501,9 @@ func (h *Handlers) CreateTransition(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TableID            uuid.UUID              `json:"table_id"`
 		StateField         string                 `json:"state_field"`
+		FromStateID        *uuid.UUID             `json:"from_state_id"`
 		FromState          string                 `json:"from_state"`
+		ToStateID          *uuid.UUID             `json:"to_state_id"`
 		ToState            string                 `json:"to_state"`
 		Label              string                 `json:"label"`
 		RequiredRoleID     *uuid.UUID             `json:"required_role_id"`
@@ -516,18 +518,38 @@ func (h *Handlers) CreateTransition(w http.ResponseWriter, r *http.Request) {
 		req.StateField = "state"
 	}
 
+	var fromVal interface{} = req.FromState
+	if req.FromStateID != nil && *req.FromStateID != uuid.Nil {
+		fromVal = *req.FromStateID
+	}
+	fromStateItem, err := h.fsmEngine.ResolveState(r.Context(), fromVal, &req.TableID)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "INVALID_STATE", fmt.Sprintf("Estado de origem inválido: %v", err))
+		return
+	}
+
+	var toVal interface{} = req.ToState
+	if req.ToStateID != nil && *req.ToStateID != uuid.Nil {
+		toVal = *req.ToStateID
+	}
+	toStateItem, err := h.fsmEngine.ResolveState(r.Context(), toVal, &req.TableID)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "INVALID_STATE", fmt.Sprintf("Estado de destino inválido: %v", err))
+		return
+	}
+
 	condJSON, _ := json.Marshal(req.ConditionTree)
 	actionJSON, _ := json.Marshal(req.OnTransitionAction)
 
 	var newID uuid.UUID
-	err := auth.ExecuteInTx(r.Context(), h.db, secCtx, func(tx pgx.Tx) error {
+	err = auth.ExecuteInTx(r.Context(), h.db, secCtx, func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(), `
 			INSERT INTO sys_state_transition (
-				table_id, state_field, from_state, to_state, label,
+				table_id, state_field, from_state_id, to_state_id, from_state, to_state, label,
 				required_role_id, condition_tree, on_transition_action
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			RETURNING sys_id
-		`, req.TableID, req.StateField, req.FromState, req.ToState, req.Label, req.RequiredRoleID, condJSON, actionJSON).Scan(&newID)
+		`, req.TableID, req.StateField, fromStateItem.SysID, toStateItem.SysID, fromStateItem.Name, toStateItem.Name, req.Label, req.RequiredRoleID, condJSON, actionJSON).Scan(&newID)
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "TRANSITION_CREATE_ERROR", err.Error())
@@ -539,10 +561,15 @@ func (h *Handlers) CreateTransition(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) ListTransitions(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Pool.Query(r.Context(), `
-		SELECT st.sys_id, st.table_id, o.name AS table_name, st.from_state, st.to_state, st.label, st.is_active
+		SELECT st.sys_id, st.table_id, o.name AS table_name,
+		       st.from_state_id, COALESCE(fs.name, st.from_state, '') AS from_state, COALESCE(fs.label, st.from_state, '') AS from_state_label,
+		       st.to_state_id, COALESCE(ts.name, st.to_state, '') AS to_state, COALESCE(ts.label, st.to_state, '') AS to_state_label,
+		       st.label, st.is_active
 		FROM sys_state_transition st
 		JOIN sys_db_object o ON o.sys_id = st.table_id
-		ORDER BY o.name ASC, st.from_state ASC
+		LEFT JOIN sys_state fs ON fs.sys_id = st.from_state_id
+		LEFT JOIN sys_state ts ON ts.sys_id = st.to_state_id
+		ORDER BY o.name ASC, st.label ASC
 	`)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
@@ -553,22 +580,114 @@ func (h *Handlers) ListTransitions(w http.ResponseWriter, r *http.Request) {
 	list := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var sysID, tableID uuid.UUID
-		var tableName, from, to, label string
+		var fromID, toID *uuid.UUID
+		var tableName, from, fromLabel, to, toLabel, label string
 		var active bool
-		if err := rows.Scan(&sysID, &tableID, &tableName, &from, &to, &label, &active); err == nil {
+		if err := rows.Scan(&sysID, &tableID, &tableName, &fromID, &from, &fromLabel, &toID, &to, &toLabel, &label, &active); err == nil {
 			list = append(list, map[string]interface{}{
-				"sys_id":     sysID,
-				"table_id":   tableID,
-				"table_name": tableName,
-				"from_state": from,
-				"to_state":   to,
-				"label":      label,
-				"is_active":  active,
+				"sys_id":           sysID,
+				"table_id":         tableID,
+				"table_name":       tableName,
+				"from_state_id":    fromID,
+				"from_state":       from,
+				"from_state_label": fromLabel,
+				"to_state_id":      toID,
+				"to_state":         to,
+				"to_state_label":   toLabel,
+				"label":            label,
+				"is_active":        active,
 			})
 		}
 	}
 
 	respondJSON(w, http.StatusOK, list)
+}
+
+func (h *Handlers) ListStates(w http.ResponseWriter, r *http.Request) {
+	var tableID *uuid.UUID
+	if tidStr := r.URL.Query().Get("table_id"); tidStr != "" {
+		if uid, err := uuid.Parse(tidStr); err == nil {
+			tableID = &uid
+		}
+	} else if tname := r.URL.Query().Get("table_name"); tname != "" {
+		var uid uuid.UUID
+		if err := h.db.Pool.QueryRow(r.Context(), "SELECT sys_id FROM sys_db_object WHERE name = $1", tname).Scan(&uid); err == nil {
+			tableID = &uid
+		}
+	}
+
+	states, err := h.fsmEngine.ListStates(r.Context(), tableID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, states)
+}
+
+func (h *Handlers) GetState(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "state_id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "state_id inválido.")
+		return
+	}
+	state, err := h.fsmEngine.GetState(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, state)
+}
+
+func (h *Handlers) CreateState(w http.ResponseWriter, r *http.Request) {
+	secCtx := auth.GetSecurityContext(r.Context())
+	var item fsm.StateItem
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "Payload inválido.")
+		return
+	}
+	created, err := h.fsmEngine.CreateState(r.Context(), item, secCtx)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "STATE_CREATE_ERROR", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusCreated, created)
+}
+
+func (h *Handlers) UpdateState(w http.ResponseWriter, r *http.Request) {
+	secCtx := auth.GetSecurityContext(r.Context())
+	idStr := chi.URLParam(r, "state_id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "state_id inválido.")
+		return
+	}
+	var item fsm.StateItem
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "Payload inválido.")
+		return
+	}
+	updated, err := h.fsmEngine.UpdateState(r.Context(), id, item, secCtx)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "STATE_UPDATE_ERROR", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, updated)
+}
+
+func (h *Handlers) DeleteState(w http.ResponseWriter, r *http.Request) {
+	secCtx := auth.GetSecurityContext(r.Context())
+	idStr := chi.URLParam(r, "state_id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "BAD_REQUEST", "state_id inválido.")
+		return
+	}
+	if err := h.fsmEngine.DeleteState(r.Context(), id, secCtx); err != nil {
+		respondError(w, http.StatusBadRequest, "STATE_DELETE_ERROR", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"message": "Estado excluído com sucesso"})
 }
 
 func (h *Handlers) CreateBusinessRule(w http.ResponseWriter, r *http.Request) {
@@ -936,8 +1055,12 @@ func (h *Handlers) GetTransition(w http.ResponseWriter, r *http.Request) {
 		TableID            uuid.UUID              `json:"table_id"`
 		TableName          string                 `json:"table_name"`
 		StateField         string                 `json:"state_field"`
+		FromStateID        *uuid.UUID             `json:"from_state_id"`
 		FromState          string                 `json:"from_state"`
+		FromStateLabel     string                 `json:"from_state_label"`
+		ToStateID          *uuid.UUID             `json:"to_state_id"`
 		ToState            string                 `json:"to_state"`
+		ToStateLabel       string                 `json:"to_state_label"`
 		Label              string                 `json:"label"`
 		RequiredRoleID     *uuid.UUID             `json:"required_role_id"`
 		ConditionTree      map[string]interface{} `json:"condition_tree"`
@@ -948,14 +1071,20 @@ func (h *Handlers) GetTransition(w http.ResponseWriter, r *http.Request) {
 
 	var condBytes, actionBytes []byte
 	err = h.db.Pool.QueryRow(r.Context(), `
-		SELECT st.sys_id, st.table_id, o.name, st.state_field, st.from_state, st.to_state,
+		SELECT st.sys_id, st.table_id, o.name, st.state_field,
+		       st.from_state_id, COALESCE(fs.name, st.from_state, ''), COALESCE(fs.label, st.from_state, ''),
+		       st.to_state_id, COALESCE(ts.name, st.to_state, ''), COALESCE(ts.label, st.to_state, ''),
 		       st.label, st.required_role_id, st.condition_tree, st.on_transition_action,
 		       st.is_active, st.sys_created_on
 		FROM sys_state_transition st
 		JOIN sys_db_object o ON o.sys_id = st.table_id
+		LEFT JOIN sys_state fs ON fs.sys_id = st.from_state_id
+		LEFT JOIN sys_state ts ON ts.sys_id = st.to_state_id
 		WHERE st.sys_id = $1
 	`, id).Scan(
-		&t.SysID, &t.TableID, &t.TableName, &t.StateField, &t.FromState, &t.ToState,
+		&t.SysID, &t.TableID, &t.TableName, &t.StateField,
+		&t.FromStateID, &t.FromState, &t.FromStateLabel,
+		&t.ToStateID, &t.ToState, &t.ToStateLabel,
 		&t.Label, &t.RequiredRoleID, &condBytes, &actionBytes,
 		&t.IsActive, &t.SysCreatedOn,
 	)
@@ -986,7 +1115,9 @@ func (h *Handlers) UpdateTransition(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TableID            *uuid.UUID             `json:"table_id"`
 		StateField         *string                `json:"state_field"`
+		FromStateID        *uuid.UUID             `json:"from_state_id"`
 		FromState          *string                `json:"from_state"`
+		ToStateID          *uuid.UUID             `json:"to_state_id"`
 		ToState            *string                `json:"to_state"`
 		Label              *string                `json:"label"`
 		RequiredRoleID     *uuid.UUID             `json:"required_role_id"`
@@ -1001,15 +1132,16 @@ func (h *Handlers) UpdateTransition(w http.ResponseWriter, r *http.Request) {
 
 	err = auth.ExecuteInTx(r.Context(), h.db, secCtx, func(tx pgx.Tx) error {
 		var curTableID uuid.UUID
+		var curFromStateID, curToStateID uuid.UUID
 		var curStateField, curFromState, curToState, curLabel string
 		var curRoleID *uuid.UUID
 		var curCond, curAction []byte
 		var curActive bool
 
 		err := tx.QueryRow(r.Context(), `
-			SELECT table_id, state_field, from_state, to_state, label, required_role_id, condition_tree, on_transition_action, is_active
+			SELECT table_id, state_field, from_state_id, from_state, to_state_id, to_state, label, required_role_id, condition_tree, on_transition_action, is_active
 			FROM sys_state_transition WHERE sys_id = $1
-		`, id).Scan(&curTableID, &curStateField, &curFromState, &curToState, &curLabel, &curRoleID, &curCond, &curAction, &curActive)
+		`, id).Scan(&curTableID, &curStateField, &curFromStateID, &curFromState, &curToStateID, &curToState, &curLabel, &curRoleID, &curCond, &curAction, &curActive)
 		if err != nil {
 			return errors.New("transição não encontrada")
 		}
@@ -1020,12 +1152,39 @@ func (h *Handlers) UpdateTransition(w http.ResponseWriter, r *http.Request) {
 		if req.StateField != nil && *req.StateField != "" {
 			curStateField = *req.StateField
 		}
-		if req.FromState != nil && *req.FromState != "" {
-			curFromState = *req.FromState
+
+		if req.FromStateID != nil && *req.FromStateID != uuid.Nil {
+			st, err := h.fsmEngine.ResolveState(r.Context(), *req.FromStateID, &curTableID)
+			if err == nil && st != nil {
+				curFromStateID = st.SysID
+				curFromState = st.Name
+			}
+		} else if req.FromState != nil && *req.FromState != "" {
+			st, err := h.fsmEngine.ResolveState(r.Context(), *req.FromState, &curTableID)
+			if err == nil && st != nil {
+				curFromStateID = st.SysID
+				curFromState = st.Name
+			} else {
+				curFromState = *req.FromState
+			}
 		}
-		if req.ToState != nil && *req.ToState != "" {
-			curToState = *req.ToState
+
+		if req.ToStateID != nil && *req.ToStateID != uuid.Nil {
+			st, err := h.fsmEngine.ResolveState(r.Context(), *req.ToStateID, &curTableID)
+			if err == nil && st != nil {
+				curToStateID = st.SysID
+				curToState = st.Name
+			}
+		} else if req.ToState != nil && *req.ToState != "" {
+			st, err := h.fsmEngine.ResolveState(r.Context(), *req.ToState, &curTableID)
+			if err == nil && st != nil {
+				curToStateID = st.SysID
+				curToState = st.Name
+			} else {
+				curToState = *req.ToState
+			}
 		}
+
 		if req.Label != nil && *req.Label != "" {
 			curLabel = *req.Label
 		}
@@ -1044,11 +1203,11 @@ func (h *Handlers) UpdateTransition(w http.ResponseWriter, r *http.Request) {
 
 		cmd, err := tx.Exec(r.Context(), `
 			UPDATE sys_state_transition
-			SET table_id = $1, state_field = $2, from_state = $3, to_state = $4,
-			    label = $5, required_role_id = $6, condition_tree = $7,
-			    on_transition_action = $8, is_active = $9
-			WHERE sys_id = $10
-		`, curTableID, curStateField, curFromState, curToState, curLabel, curRoleID, curCond, curAction, curActive, id)
+			SET table_id = $1, state_field = $2, from_state_id = $3, from_state = $4,
+			    to_state_id = $5, to_state = $6, label = $7, required_role_id = $8,
+			    condition_tree = $9, on_transition_action = $10, is_active = $11
+			WHERE sys_id = $12
+		`, curTableID, curStateField, curFromStateID, curFromState, curToStateID, curToState, curLabel, curRoleID, curCond, curAction, curActive, id)
 		if err != nil {
 			return err
 		}

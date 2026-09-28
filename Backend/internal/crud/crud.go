@@ -2,6 +2,7 @@ package crud
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"tableengine/internal/auth"
+	"tableengine/internal/condition"
 	"tableengine/internal/database"
 	"tableengine/internal/ddl"
 	"tableengine/internal/fsm"
@@ -99,6 +101,20 @@ func (e *Engine) Create(ctx context.Context, tableName string, payload map[strin
 		}
 	}
 	payload["sys_id"] = newID.String()
+
+	// Resolve any state reference columns in payload (e.g. state: "new" -> UUID of "new" state in sys_state)
+	if stateRefCols, err := e.fsmEngine.GetStateReferenceColumns(ctx, tableID); err == nil {
+		if len(stateRefCols) == 0 && payload["state"] != nil {
+			stateRefCols = append(stateRefCols, "state")
+		}
+		for _, col := range stateRefCols {
+			if val, exists := payload[col]; exists && val != nil && val != "" {
+				if s, err := e.fsmEngine.ResolveState(ctx, val, &tableID); err == nil && s != nil {
+					payload[col] = s.SysID.String()
+				}
+			}
+		}
+	}
 
 	err = auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
 		// Generate auto-number if number field exists
@@ -281,23 +297,133 @@ func (e *Engine) Update(ctx context.Context, tableName string, recordID uuid.UUI
 		expectedModCount = currentRecord["sys_mod_count"]
 	}
 
-	// 2. FSM State Transition Check if state changed
-	if newState, ok := payload["state"].(string); ok && newState != "" {
-		currState := fmt.Sprintf("%v", currentRecord["state"])
-		if !strings.EqualFold(currState, newState) {
-			// Find matching transition
-			var transitionID uuid.UUID
-			err := e.db.Pool.QueryRow(ctx, `
-				SELECT sys_id FROM sys_state_transition
-				WHERE (table_id = $1 OR table_id IN (
-					SELECT super_class_id FROM sys_db_object WHERE sys_id = $1
-				)) AND from_state = $2 AND to_state = $3 AND is_active = TRUE
-				LIMIT 1
-			`, tableID, currState, newState).Scan(&transitionID)
+	// 2. FSM State Transition Check for ANY column that references sys_state
+	stateRefCols, _ := e.fsmEngine.GetStateReferenceColumns(ctx, tableID)
+	hasStateRef := false
+	for _, col := range stateRefCols {
+		if col == "state" {
+			hasStateRef = true
+			break
+		}
+	}
+	if !hasStateRef && payload["state"] != nil {
+		stateRefCols = append(stateRefCols, "state")
+	}
 
+	for _, stateCol := range stateRefCols {
+		proposedVal, exists := payload[stateCol]
+		if !exists || proposedVal == nil || proposedVal == "" {
+			continue
+		}
+
+		currVal := currentRecord[stateCol]
+		currState, errCurr := e.fsmEngine.ResolveState(ctx, currVal, &tableID)
+		newState, errNew := e.fsmEngine.ResolveState(ctx, proposedVal, &tableID)
+
+		if errNew != nil || newState == nil {
+			return nil, fmt.Errorf("o valor '%v' para o campo '%s' não é um estado válido cadastrado em sys_state", proposedVal, stateCol)
+		}
+
+		if errCurr != nil || currState == nil {
+			currState, _ = e.fsmEngine.ResolveState(ctx, "new", &tableID)
+		}
+
+		if currState != nil && newState != nil && currState.SysID != newState.SysID {
+			// Find matching transition using polymorphic lineage CTE
+			cte := `
+				WITH RECURSIVE lineage AS (
+					SELECT sys_id, super_class_id, 0 AS depth
+					FROM sys_db_object WHERE sys_id = $1
+					UNION ALL
+					SELECT p.sys_id, p.super_class_id, l.depth + 1
+					FROM sys_db_object p
+					JOIN lineage l ON l.super_class_id = p.sys_id
+				)
+				SELECT st.sys_id, st.required_role_id, st.condition_tree, st.on_transition_action
+				FROM lineage l
+				JOIN sys_state_transition st ON st.table_id = l.sys_id
+				WHERE st.state_field = $2
+				  AND (st.from_state_id = $3 OR st.from_state = $4)
+				  AND (st.to_state_id = $5 OR st.to_state = $6)
+				  AND st.is_active = TRUE
+				ORDER BY l.depth ASC
+				LIMIT 1
+			`
+			var transID uuid.UUID
+			var reqRoleID *uuid.UUID
+			var condTreeBytes, onActionBytes []byte
+			err := e.db.Pool.QueryRow(ctx, cte, tableID, stateCol, currState.SysID, currState.Name, newState.SysID, newState.Name).Scan(
+				&transID, &reqRoleID, &condTreeBytes, &onActionBytes,
+			)
 			if err != nil {
-				return nil, fmt.Errorf("transição de estado inválida de '%s' para '%s'", currState, newState)
+				return nil, fmt.Errorf("transição de estado inválida de '%s' para '%s' no campo '%s'", currState.Label, newState.Label, stateCol)
 			}
+
+			// Validate role requirement
+			if reqRoleID != nil && !userCtx.HasRole("admin") {
+				hasRole := false
+				for _, rid := range userCtx.RoleIDs {
+					if rid == *reqRoleID {
+						hasRole = true
+						break
+					}
+				}
+				if !hasRole {
+					return nil, fmt.Errorf("permissão insuficiente para a transição de '%s' para '%s'", currState.Label, newState.Label)
+				}
+			}
+
+			// Validate execute permission
+			actionName := fmt.Sprintf("transition:%s:%s", currState.Name, newState.Name)
+			hasPerm, err := e.authService.HasPermission(ctx, userCtx, tableID, "execute", nil, &actionName)
+			if (err != nil || !hasPerm) && !userCtx.HasRole("admin") {
+				return nil, fmt.Errorf("não autorizado a executar a transição '%s'", actionName)
+			}
+
+			// Validate condition tree
+			if len(condTreeBytes) > 0 {
+				tree, err := condition.ParseConditionTree(condTreeBytes)
+				if err == nil && tree != nil {
+					merged := make(map[string]interface{})
+					for k, v := range currentRecord {
+						merged[k] = v
+					}
+					for k, v := range payload {
+						merged[k] = v
+					}
+					merged[stateCol] = newState.SysID.String()
+					merged[stateCol+"_name"] = newState.Name
+					merged[stateCol+"_label"] = newState.Label
+					if !condition.EvaluateCondition(tree, merged, currentRecord, userCtx) {
+						return nil, fmt.Errorf("condições obrigatórias para a transição para '%s' não atendidas", newState.Label)
+					}
+				}
+			}
+
+			// Apply on_transition_action
+			if len(onActionBytes) > 0 {
+				var actionDef struct {
+					SetFields map[string]interface{} `json:"set_fields"`
+				}
+				if err := json.Unmarshal(onActionBytes, &actionDef); err == nil {
+					nowStr := time.Now().UTC().Format(time.RFC3339)
+					for k, v := range actionDef.SetFields {
+						valStr := fmt.Sprintf("%v", v)
+						if valStr == "$NOW" {
+							payload[k] = nowStr
+						} else if valStr == "$CURRENT_USER" {
+							payload[k] = userCtx.UserID.String()
+						} else {
+							payload[k] = v
+						}
+					}
+				}
+			}
+
+			// Store the UUID foreign key
+			payload[stateCol] = newState.SysID.String()
+		} else if newState != nil {
+			payload[stateCol] = newState.SysID.String()
 		}
 	}
 

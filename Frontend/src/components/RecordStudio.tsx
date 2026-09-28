@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { api, TableInfo, FieldInfo, TransitionInfo, AuditEntry } from '@/lib/api';
+import { api, TableInfo, FieldInfo, TransitionInfo, AuditEntry, StateItem } from '@/lib/api';
 import {
   Database,
   Plus,
@@ -40,6 +40,7 @@ export function RecordStudio() {
   const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState<Record<string, any>>({});
   const [choicesCache, setChoicesCache] = useState<Record<string, { value: string; label: string }[]>>({});
+  const [statesCache, setStatesCache] = useState<Record<string, StateItem>>({});
 
   // FSM State transitions & Audit
   const [availableTransitions, setAvailableTransitions] = useState<TransitionInfo[]>([]);
@@ -52,6 +53,27 @@ export function RecordStudio() {
     setToast(msg);
     setTimeout(() => setToast(null), 4000);
   };
+
+  const getStateInfo = (val: any) => {
+    if (!val) return { label: 'Rascunho', color: 'slate' };
+    const s = statesCache[String(val)] || Object.values(statesCache).find((item) => item.name === String(val));
+    if (s) return { label: s.label, color: s.color || 'blue' };
+    return { label: String(val), color: 'blue' };
+  };
+
+  useEffect(() => {
+    api.fsm
+      .listStates()
+      .then((items) => {
+        const map: Record<string, StateItem> = {};
+        items.forEach((s) => {
+          map[s.sys_id] = s;
+          map[s.name] = s;
+        });
+        setStatesCache(map);
+      })
+      .catch(() => {});
+  }, []);
 
   // Load tables catalogue
   useEffect(() => {
@@ -409,8 +431,20 @@ export function RecordStudio() {
                     </span>
                   </label>
 
-                  {/* Dropdown Options */}
-                  {choices && choices.length > 0 && !isFieldReadOnly ? (
+                  {/* State Field badge display */}
+                  {f.column_name === 'state' ? (
+                    <div className="flex items-center space-x-2 py-1.5">
+                      <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-brand-500/10 text-brand-300 border border-brand-500/20 font-sans flex items-center space-x-2">
+                        <GitBranch className="w-3.5 h-3.5 text-brand-400" />
+                        <span>{getStateInfo(val).label}</span>
+                      </span>
+                      {availableTransitions.length > 0 && !isEditing && (
+                        <span className="text-[11px] text-slate-400">
+                          (Use os botões de ação acima para avançar o estado)
+                        </span>
+                      )}
+                    </div>
+                  ) : choices && choices.length > 0 && !isFieldReadOnly ? (
                     <select
                       value={String(val)}
                       onChange={(e) =>
@@ -689,9 +723,14 @@ export function RecordStudio() {
                         return (
                           <td key={c.column_name} className="py-3 px-4">
                             {c.column_name === 'state' ? (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-brand-500/10 text-brand-300 border border-brand-500/20 font-sans">
-                                {val || 'draft'}
-                              </span>
+                              (() => {
+                                const { label } = getStateInfo(val);
+                                return (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-brand-500/10 text-brand-300 border border-brand-500/20 font-sans">
+                                    {label}
+                                  </span>
+                                );
+                              })()
                             ) : c.column_name === 'number' ? (
                               <span className="font-bold text-white bg-slate-800 px-2 py-0.5 rounded">
                                 {val || '-'}

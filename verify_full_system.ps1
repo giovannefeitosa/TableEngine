@@ -124,8 +124,44 @@ Write-Host "  [OK] Excluído campo da tabela (coluna descartada no PG)" -Foregro
 Invoke-RestMethod -Uri "http://localhost:8080/api/v1/schema/tables/$tableId" -Method Delete -Headers $headers
 Write-Host "  [OK] Excluída tabela inteira no PostgreSQL" -ForegroundColor Green
 
-# 4. FSM Transitions CRUD
-Write-Host "`n4. Testando CRUD completo de FSM (Transições de Estado)..." -ForegroundColor Yellow
+# 4. FSM States & Transitions CRUD
+Write-Host "`n4. Testando CRUD completo de FSM (sys_state e Transições)..." -ForegroundColor Yellow
+
+# 4.0 FSM States CRUD (sys_state)
+Write-Host "  4.0 Validando CRUD de Estados (sys_state)..." -ForegroundColor Yellow
+$statesList = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states" -Method Get -Headers $headers
+Write-Host "    [OK] Listados $($statesList.Count) estados existentes no catálogo" -ForegroundColor Green
+
+# Cleanup previous test state if exists
+foreach ($s in $statesList) {
+    if ($s.name -eq "qa_review") {
+        Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states/$($s.sys_id)" -Method Delete -Headers $headers
+    }
+}
+
+$statePayload = @{
+    name = "qa_review"
+    label = "Revisão de Qualidade"
+    sequence = 45
+    is_active = $true
+    color = "emerald"
+    description = "Aguardando validação do time de QA"
+} | ConvertTo-Json
+$createdState = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states" -Method Post -Body $statePayload -Headers $headers
+$testStateId = $createdState.sys_id
+Write-Host "    [OK] Criado estado: $($createdState.label) (sys_id: $testStateId)" -ForegroundColor Green
+
+$gotState = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states/$testStateId" -Method Get -Headers $headers
+Write-Host "    [OK] Lido detalhes do estado: $($gotState.name) -> $($gotState.label)" -ForegroundColor Green
+
+$updateStatePayload = @{
+    label = "Revisão QA Concluída"
+    color = "blue"
+    is_active = $true
+} | ConvertTo-Json
+$updatedState = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states/$testStateId" -Method Put -Body $updateStatePayload -Headers $headers
+Write-Host "    [OK] Atualizado estado: $($updatedState.label)" -ForegroundColor Green
+
 $tablesList = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/schema/tables" -Method Get -Headers $headers
 $targetTable = $tablesList | Where-Object { -not $_.is_kernel_table } | Select-Object -First 1
 if (-not $targetTable) {
@@ -135,7 +171,7 @@ if (-not $targetTable) {
 # Cleanup previous transitions
 $existingTrans = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/transitions" -Method Get -Headers $headers
 foreach ($t in $existingTrans) {
-    if ($t.from_state -eq "draft" -and $t.to_state -eq "review") {
+    if ($t.from_state -eq "draft" -and $t.to_state -eq "in_progress" -and $t.table_id -eq $targetTable.sys_id) {
         Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/transitions/$($t.sys_id)" -Method Delete -Headers $headers
     }
 }
@@ -143,9 +179,9 @@ foreach ($t in $existingTrans) {
 $transPayload = @{
     table_id = $targetTable.sys_id
     from_state = "draft"
-    to_state = "review"
-    action_name = "btn_submit_review"
-    label = "Enviar para Revisão"
+    to_state = "in_progress"
+    action_name = "btn_start_progress"
+    label = "Iniciar Atendimento"
     roles = @("admin")
     button_variant = "primary"
 } | ConvertTo-Json
@@ -166,6 +202,9 @@ Write-Host "  [OK] Atualizada transição: $($updatedTrans.message)" -Foreground
 
 Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/transitions/$transId" -Method Delete -Headers $headers
 Write-Host "  [OK] Excluída transição" -ForegroundColor Green
+
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/fsm/states/$testStateId" -Method Delete -Headers $headers
+Write-Host "  [OK] Excluído estado de teste (sys_state)" -ForegroundColor Green
 
 # 5. Business Rules CRUD
 Write-Host "`n5. Testando CRUD completo de Regras de Negócio (sys_script)..." -ForegroundColor Yellow
@@ -212,6 +251,31 @@ Write-Host "  [OK] Atualizada regra: $($updatedRule.message)" -ForegroundColor G
 
 Invoke-RestMethod -Uri "http://localhost:8080/api/v1/rules/scripts/$ruleId" -Method Delete -Headers $headers
 Write-Host "  [OK] Excluída regra de negócio" -ForegroundColor Green
+
+# 5.1 Teste do fluxo 'Salvar como nova regra' (Split Button)
+$saveAsNewPayload = @{
+    name = "Regra de Teste (Salva como Nova)"
+    table_id = $targetTable.sys_id
+    timing = "before_update"
+    execution_order = 150
+    execution_mode = "caller"
+    action_type = "set_field_value"
+    condition_expression = @{
+        description = "Clonagem de regra"
+        conditions = @()
+    }
+    action_payload = @{
+        field = "short_description"
+        value = "Cloned Description"
+    }
+    is_active = $true
+} | ConvertTo-Json -Depth 5
+$clonedRule = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/rules/scripts" -Method Post -Body $saveAsNewPayload -Headers $headers
+$clonedRuleId = $clonedRule.sys_id
+Write-Host "  [OK] Testado 'Salvar como nova regra': $($saveAsNewPayload.name) (sys_id: $clonedRuleId)" -ForegroundColor Green
+
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/rules/scripts/$clonedRuleId" -Method Delete -Headers $headers
+Write-Host "  [OK] Excluída regra clonada com sucesso" -ForegroundColor Green
 
 # 6. RBAC CRUD (Users, Groups, Roles, Permissions)
 Write-Host "`n6. Testando CRUD completo de RBAC..." -ForegroundColor Yellow

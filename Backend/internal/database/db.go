@@ -19,6 +19,13 @@ var (
 	AdminUserID         = uuid.MustParse("00000000-0000-4000-8000-000000000002")
 	AdminGroupID        = uuid.MustParse("10000000-0000-0000-0000-000000000001")
 	AdminRoleID         = uuid.MustParse("20000000-0000-0000-0000-000000000001")
+
+	StateDraftID      = uuid.MustParse("30000000-0000-0000-0000-000000000001")
+	StateNewID        = uuid.MustParse("30000000-0000-0000-0000-000000000002")
+	StateInProgressID = uuid.MustParse("30000000-0000-0000-0000-000000000003")
+	StateResolvedID   = uuid.MustParse("30000000-0000-0000-0000-000000000004")
+	StateClosedID     = uuid.MustParse("30000000-0000-0000-0000-000000000005")
+	StateCanceledID   = uuid.MustParse("30000000-0000-0000-0000-000000000006")
 )
 
 var KernelTables = []string{
@@ -35,6 +42,7 @@ var KernelTables = []string{
 	"sys_number",
 	"sys_number_counter",
 	"sys_script",
+	"sys_state",
 	"sys_state_transition",
 }
 
@@ -268,6 +276,11 @@ func (db *DB) MigrateAndBootstrap(ctx context.Context) error {
 		}
 	}
 
+	// Seed standard states and migrate existing tables/transitions
+	if err := db.migrateAndSeedStates(ctx, tx); err != nil {
+		return fmt.Errorf("failed to migrate and seed states: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit bootstrap transaction: %w", err)
 	}
@@ -384,6 +397,8 @@ func formatTableLabel(name string) string {
 		return "Trilha de Auditoria"
 	case "sys_script":
 		return "Regras de Negócio (Business Rules)"
+	case "sys_state":
+		return "Estados do Ciclo de Vida (FSM)"
 	case "sys_state_transition":
 		return "Transições de Estado (FSM)"
 	default:
@@ -425,7 +440,147 @@ func formatFieldLabel(name string) string {
 		return "Estado"
 	case "short_description":
 		return "Descrição Curta"
+	case "from_state_id":
+		return "Estado de Origem (ID)"
+	case "to_state_id":
+		return "Estado de Destino (ID)"
+	case "from_state":
+		return "Estado de Origem"
+	case "to_state":
+		return "Estado de Destino"
 	default:
 		return name
 	}
 }
+
+func (db *DB) migrateAndSeedStates(ctx context.Context, tx pgx.Tx) error {
+	// 1. Seed standard states in sys_state
+	states := []struct {
+		id    uuid.UUID
+		name  string
+		label string
+		seq   int
+		color string
+	}{
+		{StateDraftID, "draft", "Rascunho", 10, "slate"},
+		{StateNewID, "new", "Novo", 20, "blue"},
+		{StateInProgressID, "in_progress", "Em Andamento", 30, "amber"},
+		{StateResolvedID, "resolved", "Resolvido", 40, "emerald"},
+		{StateClosedID, "closed", "Fechado", 50, "purple"},
+		{StateCanceledID, "canceled", "Cancelado", 60, "rose"},
+	}
+
+	for _, s := range states {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO sys_state (sys_id, name, label, sequence, is_active, color, sys_created_by, sys_updated_by)
+			VALUES ($1, $2, $3, $4, TRUE, $5, $6, $6)
+			ON CONFLICT (sys_id) DO UPDATE SET
+				label = EXCLUDED.label,
+				sequence = EXCLUDED.sequence,
+				color = EXCLUDED.color
+		`, s.id, s.name, s.label, s.seq, s.color, SystemServiceUserID)
+		if err != nil {
+			return fmt.Errorf("failed to seed state %s: %w", s.name, err)
+		}
+	}
+
+	// 2. Ensure sys_state_transition has foreign keys populated
+	_, err := tx.Exec(ctx, `
+		ALTER TABLE sys_state_transition ADD COLUMN IF NOT EXISTS from_state_id UUID REFERENCES sys_state(sys_id) ON DELETE CASCADE;
+		ALTER TABLE sys_state_transition ADD COLUMN IF NOT EXISTS to_state_id UUID REFERENCES sys_state(sys_id) ON DELETE CASCADE;
+
+		UPDATE sys_state_transition SET from_state_id = CASE
+			WHEN from_state = 'draft' THEN '30000000-0000-0000-0000-000000000001'::uuid
+			WHEN from_state = 'new' THEN '30000000-0000-0000-0000-000000000002'::uuid
+			WHEN from_state = 'in_progress' THEN '30000000-0000-0000-0000-000000000003'::uuid
+			WHEN from_state = 'resolved' THEN '30000000-0000-0000-0000-000000000004'::uuid
+			WHEN from_state = 'closed' THEN '30000000-0000-0000-0000-000000000005'::uuid
+			WHEN from_state = 'canceled' THEN '30000000-0000-0000-0000-000000000006'::uuid
+			ELSE '30000000-0000-0000-0000-000000000002'::uuid
+		END WHERE from_state_id IS NULL;
+
+		UPDATE sys_state_transition SET to_state_id = CASE
+			WHEN to_state = 'draft' THEN '30000000-0000-0000-0000-000000000001'::uuid
+			WHEN to_state = 'new' THEN '30000000-0000-0000-0000-000000000002'::uuid
+			WHEN to_state = 'in_progress' THEN '30000000-0000-0000-0000-000000000003'::uuid
+			WHEN to_state = 'resolved' THEN '30000000-0000-0000-0000-000000000004'::uuid
+			WHEN to_state = 'closed' THEN '30000000-0000-0000-0000-000000000005'::uuid
+			WHEN to_state = 'canceled' THEN '30000000-0000-0000-0000-000000000006'::uuid
+			ELSE '30000000-0000-0000-0000-000000000004'::uuid
+		END WHERE to_state_id IS NULL;
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to migrate sys_state_transition: %w", err)
+	}
+
+	// 3. Migrate tbl_task.state to reference sys_state if tbl_task exists
+	var taskTableExists bool
+	_ = tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM sys_db_object WHERE name = 'tbl_task')").Scan(&taskTableExists)
+	if taskTableExists {
+		var stateType string
+		_ = tx.QueryRow(ctx, "SELECT data_type FROM information_schema.columns WHERE table_name = 'tbl_task' AND column_name = 'state'").Scan(&stateType)
+		if stateType != "" && stateType != "uuid" {
+			// Drop views, migrate column, and recreate views
+			_, _ = tx.Exec(ctx, "DROP VIEW IF EXISTS v_incident CASCADE;")
+			_, _ = tx.Exec(ctx, "DROP VIEW IF EXISTS v_task CASCADE;")
+
+			_, err = tx.Exec(ctx, `
+				ALTER TABLE tbl_task ADD COLUMN IF NOT EXISTS state_uuid UUID;
+				UPDATE tbl_task SET state_uuid = CASE
+					WHEN state = 'draft' THEN '30000000-0000-0000-0000-000000000001'::uuid
+					WHEN state = 'new' THEN '30000000-0000-0000-0000-000000000002'::uuid
+					WHEN state = 'in_progress' THEN '30000000-0000-0000-0000-000000000003'::uuid
+					WHEN state = 'resolved' THEN '30000000-0000-0000-0000-000000000004'::uuid
+					WHEN state = 'closed' THEN '30000000-0000-0000-0000-000000000005'::uuid
+					WHEN state = 'canceled' THEN '30000000-0000-0000-0000-000000000006'::uuid
+					ELSE '30000000-0000-0000-0000-000000000002'::uuid
+				END;
+				ALTER TABLE tbl_task DROP COLUMN state CASCADE;
+				ALTER TABLE tbl_task RENAME COLUMN state_uuid TO state;
+				ALTER TABLE tbl_task ADD CONSTRAINT fk_task_state FOREIGN KEY (state) REFERENCES sys_state(sys_id) ON DELETE RESTRICT;
+				ALTER TABLE tbl_task ALTER COLUMN state SET DEFAULT '30000000-0000-0000-0000-000000000002'::uuid;
+
+				CREATE OR REPLACE VIEW v_task AS SELECT * FROM tbl_task;
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to alter tbl_task.state: %w", err)
+			}
+
+			// If tbl_incident exists, recreate view v_incident
+			var incExists bool
+			_ = tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM sys_db_object WHERE name = 'tbl_incident')").Scan(&incExists)
+			if incExists {
+				_, _ = tx.Exec(ctx, `
+					CREATE OR REPLACE VIEW v_incident AS
+					SELECT t1.sys_id, t1.sys_class_name, t1.sys_created_on, t1.sys_created_by,
+					       t1.sys_updated_on, t1.sys_updated_by, t1.sys_mod_count, t1.short_description,
+					       t1.state, t1.number, t0.severity, t0.close_notes
+					FROM tbl_incident t0
+					JOIN tbl_task t1 ON t0.sys_id = t1.sys_id;
+				`)
+			}
+		}
+
+		// Update sys_dictionary for tbl_task.state
+		_, _ = tx.Exec(ctx, `
+			UPDATE sys_dictionary
+			SET internal_type = 'reference',
+			    reference_table_id = (SELECT sys_id FROM sys_db_object WHERE name = 'sys_state'),
+			    default_value = '30000000-0000-0000-0000-000000000002'
+			WHERE table_id = (SELECT sys_id FROM sys_db_object WHERE name = 'tbl_task')
+			  AND column_name = 'state';
+		`)
+	}
+
+	// Update reference_table_id in sys_dictionary for from_state_id and to_state_id on sys_state_transition
+	_, _ = tx.Exec(ctx, `
+		UPDATE sys_dictionary
+		SET internal_type = 'reference',
+		    reference_table_id = (SELECT sys_id FROM sys_db_object WHERE name = 'sys_state')
+		WHERE table_id = (SELECT sys_id FROM sys_db_object WHERE name = 'sys_state_transition')
+		  AND column_name IN ('from_state_id', 'to_state_id');
+	`)
+
+	return nil
+}
+

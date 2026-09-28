@@ -47,10 +47,26 @@ export interface ChoiceInfo {
   sequence: number;
 }
 
+export interface StateItem {
+  sys_id: string;
+  table_id?: string;
+  table_name?: string;
+  name: string;
+  label: string;
+  sequence: number;
+  is_active: boolean;
+  color: string;
+  description?: string;
+}
+
 export interface TransitionInfo {
   transition_id: string;
+  from_state_id?: string;
   from_state: string;
+  from_state_label?: string;
+  to_state_id?: string;
   to_state: string;
+  to_state_label?: string;
   label: string;
   action_name: string;
   defined_in_table: string;
@@ -259,6 +275,23 @@ export const api = {
   },
 
   fsm: {
+    listStates: (tableId?: string) =>
+      request<StateItem[]>(tableId ? `/fsm/states?table_id=${tableId}` : '/fsm/states'),
+    getState: (id: string) => request<StateItem>(`/fsm/states/${id}`),
+    createState: (payload: Partial<StateItem>) =>
+      request<StateItem>('/fsm/states', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    updateState: (id: string, payload: Partial<StateItem>) =>
+      request<StateItem>(`/fsm/states/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    deleteState: (id: string) =>
+      request<void>(`/fsm/states/${id}`, {
+        method: 'DELETE',
+      }),
     listTransitions: () => request<any[]>('/fsm/transitions'),
     getTransition: (id: string) => request<any>(`/fsm/transitions/${id}`),
     createTransition: (payload: any) =>

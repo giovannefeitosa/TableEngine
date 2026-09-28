@@ -16,10 +16,26 @@ import (
 	"tableengine/internal/database"
 )
 
+type StateItem struct {
+	SysID       uuid.UUID  `json:"sys_id"`
+	TableID     *uuid.UUID `json:"table_id,omitempty"`
+	TableName   string     `json:"table_name,omitempty"`
+	Name        string     `json:"name"`
+	Label       string     `json:"label"`
+	Sequence    int        `json:"sequence"`
+	IsActive    bool       `json:"is_active"`
+	Color       string     `json:"color"`
+	Description string     `json:"description,omitempty"`
+}
+
 type TransitionInfo struct {
 	TransitionID       uuid.UUID  `json:"transition_id"`
+	FromStateID        uuid.UUID  `json:"from_state_id"`
 	FromState          string     `json:"from_state"`
+	FromStateLabel     string     `json:"from_state_label"`
+	ToStateID          uuid.UUID  `json:"to_state_id"`
 	ToState            string     `json:"to_state"`
+	ToStateLabel       string     `json:"to_state_label"`
 	Label              string     `json:"label"`
 	ActionName         string     `json:"action_name"`
 	DefinedInTable     string     `json:"defined_in_table"`
@@ -38,25 +54,264 @@ func NewEngine(db *database.DB, authService *auth.Service) *Engine {
 	return &Engine{db: db, authService: authService}
 }
 
-// GetAvailableTransitions retrieves transitions that the user is authorized to execute on the current record.
-func (e *Engine) GetAvailableTransitions(ctx context.Context, tableName string, record map[string]interface{}, userCtx *auth.SecurityContext) ([]TransitionInfo, error) {
-	currentState, ok := record["state"].(string)
-	if !ok || currentState == "" {
-		currentState = "draft"
+// ListStates lists all states, optionally filtered by tableID or global.
+func (e *Engine) ListStates(ctx context.Context, tableID *uuid.UUID) ([]StateItem, error) {
+	var query string
+	var args []interface{}
+
+	if tableID != nil && *tableID != uuid.Nil {
+		query = `
+			SELECT s.sys_id, s.table_id, COALESCE(o.name, ''), s.name, s.label, s.sequence, s.is_active, s.color, COALESCE(s.description, '')
+			FROM sys_state s
+			LEFT JOIN sys_db_object o ON o.sys_id = s.table_id
+			WHERE s.table_id = $1 OR s.table_id IS NULL
+			ORDER BY s.sequence ASC, s.name ASC
+		`
+		args = append(args, *tableID)
+	} else {
+		query = `
+			SELECT s.sys_id, s.table_id, COALESCE(o.name, ''), s.name, s.label, s.sequence, s.is_active, s.color, COALESCE(s.description, '')
+			FROM sys_state s
+			LEFT JOIN sys_db_object o ON o.sys_id = s.table_id
+			ORDER BY s.sequence ASC, s.name ASC
+		`
 	}
 
-	transitions, err := e.resolvePolymorphicTransitions(ctx, tableName, "state")
+	rows, err := e.db.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var states []StateItem
+	for rows.Next() {
+		var item StateItem
+		if err := rows.Scan(
+			&item.SysID, &item.TableID, &item.TableName,
+			&item.Name, &item.Label, &item.Sequence,
+			&item.IsActive, &item.Color, &item.Description,
+		); err != nil {
+			return nil, err
+		}
+		states = append(states, item)
+	}
+	return states, nil
+}
+
+// GetState retrieves a state by its sys_id.
+func (e *Engine) GetState(ctx context.Context, id uuid.UUID) (*StateItem, error) {
+	var item StateItem
+	err := e.db.Pool.QueryRow(ctx, `
+		SELECT s.sys_id, s.table_id, COALESCE(o.name, ''), s.name, s.label, s.sequence, s.is_active, s.color, COALESCE(s.description, '')
+		FROM sys_state s
+		LEFT JOIN sys_db_object o ON o.sys_id = s.table_id
+		WHERE s.sys_id = $1
+	`, id).Scan(
+		&item.SysID, &item.TableID, &item.TableName,
+		&item.Name, &item.Label, &item.Sequence,
+		&item.IsActive, &item.Color, &item.Description,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("estado não encontrado: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateState creates a new status in sys_state.
+func (e *Engine) CreateState(ctx context.Context, item StateItem, userCtx *auth.SecurityContext) (*StateItem, error) {
+	if strings.TrimSpace(item.Name) == "" {
+		return nil, errors.New("o identificador (name) do estado é obrigatório")
+	}
+	if strings.TrimSpace(item.Label) == "" {
+		item.Label = item.Name
+	}
+	if strings.TrimSpace(item.Color) == "" {
+		item.Color = "gray"
+	}
+
+	var newID uuid.UUID
+	err := auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO sys_state (table_id, name, label, sequence, is_active, color, description, sys_created_by, sys_updated_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+			RETURNING sys_id
+		`, item.TableID, strings.TrimSpace(item.Name), strings.TrimSpace(item.Label), item.Sequence, item.IsActive, item.Color, item.Description, userCtx.UserID).Scan(&newID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.GetState(ctx, newID)
+}
+
+// UpdateState updates a state in sys_state.
+func (e *Engine) UpdateState(ctx context.Context, id uuid.UUID, item StateItem, userCtx *auth.SecurityContext) (*StateItem, error) {
+	err := auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		cmd, err := tx.Exec(ctx, `
+			UPDATE sys_state
+			SET label = $1, sequence = $2, is_active = $3, color = $4, description = $5,
+			    sys_updated_on = clock_timestamp(), sys_updated_by = $6, sys_mod_count = sys_mod_count + 1
+			WHERE sys_id = $7
+		`, item.Label, item.Sequence, item.IsActive, item.Color, item.Description, userCtx.UserID, id)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("estado não encontrado para atualização")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.GetState(ctx, id)
+}
+
+// DeleteState removes a state from sys_state.
+func (e *Engine) DeleteState(ctx context.Context, id uuid.UUID, userCtx *auth.SecurityContext) error {
+	return auth.ExecuteInTx(ctx, e.db, userCtx, func(tx pgx.Tx) error {
+		cmd, err := tx.Exec(ctx, "DELETE FROM sys_state WHERE sys_id = $1", id)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return errors.New("estado não encontrado para exclusão")
+		}
+		return nil
+	})
+}
+
+// ResolveState resolves a state by either UUID or name string, respecting table lineage if provided.
+func (e *Engine) ResolveState(ctx context.Context, val interface{}, tableID *uuid.UUID) (*StateItem, error) {
+	if val == nil {
+		return nil, errors.New("valor de estado nulo")
+	}
+
+	valStr := fmt.Sprintf("%v", val)
+	valStr = strings.TrimSpace(valStr)
+	if valStr == "" {
+		return nil, errors.New("valor de estado vazio")
+	}
+
+	// 1. Try parsing as UUID
+	if uid, err := uuid.Parse(valStr); err == nil {
+		state, err := e.GetState(ctx, uid)
+		if err == nil {
+			return state, nil
+		}
+	}
+
+	// 2. Lookup by name
+	var item StateItem
+	var query string
+	var args []interface{}
+
+	if tableID != nil && *tableID != uuid.Nil {
+		query = `
+			SELECT s.sys_id, s.table_id, COALESCE(o.name, ''), s.name, s.label, s.sequence, s.is_active, s.color, COALESCE(s.description, '')
+			FROM sys_state s
+			LEFT JOIN sys_db_object o ON o.sys_id = s.table_id
+			WHERE LOWER(s.name) = LOWER($1) AND (s.table_id = $2 OR s.table_id IS NULL)
+			ORDER BY (s.table_id IS NOT NULL) DESC
+			LIMIT 1
+		`
+		args = []interface{}{valStr, *tableID}
+	} else {
+		query = `
+			SELECT s.sys_id, s.table_id, COALESCE(o.name, ''), s.name, s.label, s.sequence, s.is_active, s.color, COALESCE(s.description, '')
+			FROM sys_state s
+			LEFT JOIN sys_db_object o ON o.sys_id = s.table_id
+			WHERE LOWER(s.name) = LOWER($1)
+			ORDER BY (s.table_id IS NOT NULL) DESC
+			LIMIT 1
+		`
+		args = []interface{}{valStr}
+	}
+
+	err := e.db.Pool.QueryRow(ctx, query, args...).Scan(
+		&item.SysID, &item.TableID, &item.TableName,
+		&item.Name, &item.Label, &item.Sequence,
+		&item.IsActive, &item.Color, &item.Description,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("estado '%s' não encontrado em sys_state", valStr)
+	}
+
+	return &item, nil
+}
+
+// GetStateReferenceColumns finds all columns in the table lineage that are references to sys_state.
+func (e *Engine) GetStateReferenceColumns(ctx context.Context, tableID uuid.UUID) ([]string, error) {
+	cte := `
+		WITH RECURSIVE lineage AS (
+			SELECT sys_id, super_class_id FROM sys_db_object WHERE sys_id = $1
+			UNION ALL
+			SELECT p.sys_id, p.super_class_id FROM sys_db_object p
+			JOIN lineage l ON l.super_class_id = p.sys_id
+		)
+		SELECT DISTINCT d.column_name
+		FROM sys_dictionary d
+		JOIN sys_db_object ro ON ro.sys_id = d.reference_table_id
+		WHERE d.table_id IN (SELECT sys_id FROM lineage)
+		  AND d.internal_type = 'reference'
+		  AND ro.name = 'sys_state';
+	`
+	rows, err := e.db.Pool.Query(ctx, cte, tableID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err == nil {
+			cols = append(cols, col)
+		}
+	}
+	return cols, nil
+}
+
+// GetAvailableTransitions retrieves transitions that the user is authorized to execute on the current record.
+func (e *Engine) GetAvailableTransitions(ctx context.Context, tableName string, record map[string]interface{}, userCtx *auth.SecurityContext) ([]TransitionInfo, error) {
+	var tableID uuid.UUID
+	_ = e.db.Pool.QueryRow(ctx, "SELECT sys_id FROM sys_db_object WHERE name = $1", tableName).Scan(&tableID)
+
+	// Identify state field: check reference columns or default to 'state'
+	stateField := "state"
+	refCols, _ := e.GetStateReferenceColumns(ctx, tableID)
+	if len(refCols) > 0 {
+		stateField = refCols[0]
+	}
+
+	// Current state resolution
+	currentVal := record[stateField]
+	if currentVal == nil || currentVal == "" {
+		currentVal = "new"
+	}
+
+	resolvedState, err := e.ResolveState(ctx, currentVal, &tableID)
+	var currentUID uuid.UUID
+	var currentName string
+	if err == nil && resolvedState != nil {
+		currentUID = resolvedState.SysID
+		currentName = resolvedState.Name
+	} else {
+		currentName = fmt.Sprintf("%v", currentVal)
+	}
+
+	transitions, err := e.resolvePolymorphicTransitions(ctx, tableName, stateField)
 	if err != nil {
 		return nil, err
 	}
 
-	var tableID uuid.UUID
-	_ = e.db.Pool.QueryRow(ctx, "SELECT sys_id FROM sys_db_object WHERE name = $1", tableName).Scan(&tableID)
-
 	available := make([]TransitionInfo, 0)
 	for _, t := range transitions {
-		// 1. Must match current state
-		if !strings.EqualFold(t.FromState, currentState) {
+		// 1. Must match current state (by UUID or name)
+		if t.FromStateID != uuid.Nil && currentUID != uuid.Nil {
+			if t.FromStateID != currentUID {
+				continue
+			}
+		} else if !strings.EqualFold(t.FromState, currentName) {
 			continue
 		}
 
@@ -78,7 +333,6 @@ func (e *Engine) GetAvailableTransitions(ctx context.Context, tableName string, 
 		actionName := t.ActionName
 		hasPerm, err := e.authService.HasPermission(ctx, userCtx, tableID, "execute", nil, &actionName)
 		if err != nil || !hasPerm {
-			// If not admin and doesn't have explicit permission, continue
 			if !userCtx.HasRole("admin") {
 				continue
 			}
@@ -88,7 +342,16 @@ func (e *Engine) GetAvailableTransitions(ctx context.Context, tableName string, 
 		if len(t.ConditionTreeJSON) > 0 {
 			tree, err := condition.ParseConditionTree(t.ConditionTreeJSON)
 			if err == nil && tree != nil {
-				if !condition.EvaluateCondition(tree, record, nil, userCtx) {
+				enriched := make(map[string]interface{})
+				for k, v := range record {
+					enriched[k] = v
+				}
+				if resolvedState != nil {
+					enriched[stateField] = resolvedState.Name
+					enriched[stateField+"_id"] = resolvedState.SysID.String()
+					enriched[stateField+"_label"] = resolvedState.Label
+				}
+				if !condition.EvaluateCondition(tree, enriched, nil, userCtx) {
 					continue
 				}
 			}
@@ -110,27 +373,58 @@ func (e *Engine) ValidateAndApplyTransition(
 	proposedPayload map[string]interface{},
 	userCtx *auth.SecurityContext,
 ) (string, map[string]interface{}, error) {
-	// Query the transition
 	var (
-		fromState          string
-		toState            string
+		fromStateID        uuid.UUID
+		fromStateName      string
+		fromStateLabel     string
+		toStateID          uuid.UUID
+		toStateName        string
+		toStateLabel       string
+		stateField         string
 		requiredRoleID     *uuid.UUID
 		conditionTreeData  []byte
 		onTransitionAction []byte
 	)
 
 	err := tx.QueryRow(ctx, `
-		SELECT from_state, to_state, required_role_id, condition_tree, on_transition_action
-		FROM sys_state_transition
-		WHERE sys_id = $1 AND is_active = TRUE
-	`, transitionID).Scan(&fromState, &toState, &requiredRoleID, &conditionTreeData, &onTransitionAction)
+		SELECT st.from_state_id, COALESCE(fs.name, st.from_state, ''), COALESCE(fs.label, st.from_state, ''),
+		       st.to_state_id, COALESCE(ts.name, st.to_state, ''), COALESCE(ts.label, st.to_state, ''),
+		       st.state_field, st.required_role_id, st.condition_tree, st.on_transition_action
+		FROM sys_state_transition st
+		LEFT JOIN sys_state fs ON fs.sys_id = st.from_state_id
+		LEFT JOIN sys_state ts ON ts.sys_id = st.to_state_id
+		WHERE st.sys_id = $1 AND st.is_active = TRUE
+	`, transitionID).Scan(
+		&fromStateID, &fromStateName, &fromStateLabel,
+		&toStateID, &toStateName, &toStateLabel,
+		&stateField, &requiredRoleID, &conditionTreeData, &onTransitionAction,
+	)
 	if err != nil {
 		return "", nil, errors.New("transição de estado não encontrada ou inativa")
 	}
 
-	currentState := fmt.Sprintf("%v", currentRecord["state"])
-	if !strings.EqualFold(currentState, fromState) {
-		return "", nil, fmt.Errorf("transição inválida: o registro está no estado '%s', mas a ação requer '%s'", currentState, fromState)
+	if stateField == "" {
+		stateField = "state"
+	}
+
+	// Validate current record matches from_state
+	currentVal := currentRecord[stateField]
+	var currentUID uuid.UUID
+	if currentVal != nil {
+		if uid, err := uuid.Parse(fmt.Sprintf("%v", currentVal)); err == nil {
+			currentUID = uid
+		}
+	}
+
+	if currentUID != uuid.Nil && fromStateID != uuid.Nil {
+		if currentUID != fromStateID {
+			return "", nil, fmt.Errorf("transição inválida: o registro está em '%s', mas a ação requer '%s'", currentVal, fromStateLabel)
+		}
+	} else {
+		currStr := fmt.Sprintf("%v", currentVal)
+		if !strings.EqualFold(currStr, fromStateName) && !strings.EqualFold(currStr, fromStateID.String()) {
+			return "", nil, fmt.Errorf("transição inválida: o registro está no estado '%s', mas a ação requer '%s'", currStr, fromStateLabel)
+		}
 	}
 
 	// Validate role
@@ -155,7 +449,9 @@ func (e *Engine) ValidateAndApplyTransition(
 	for k, v := range proposedPayload {
 		merged[k] = v
 	}
-	merged["state"] = toState
+	merged[stateField] = toStateID.String()
+	merged[stateField+"_name"] = toStateName
+	merged[stateField+"_label"] = toStateLabel
 
 	// Evaluate condition tree
 	if len(conditionTreeData) > 0 {
@@ -167,12 +463,13 @@ func (e *Engine) ValidateAndApplyTransition(
 		}
 	}
 
-	// Apply on_transition_action
+	// Apply mutations
 	mutations := make(map[string]interface{})
 	for k, v := range proposedPayload {
 		mutations[k] = v
 	}
-	mutations["state"] = toState
+	// The state column in DB is a reference to sys_state: store the UUID!
+	mutations[stateField] = toStateID.String()
 
 	if len(onTransitionAction) > 0 {
 		var actionDef struct {
@@ -193,7 +490,7 @@ func (e *Engine) ValidateAndApplyTransition(
 		}
 	}
 
-	return toState, mutations, nil
+	return toStateID.String(), mutations, nil
 }
 
 func (e *Engine) resolvePolymorphicTransitions(ctx context.Context, tableName, stateField string) ([]TransitionInfo, error) {
@@ -209,10 +506,14 @@ func (e *Engine) resolvePolymorphicTransitions(ctx context.Context, tableName, s
 			FROM sys_db_object parent
 			JOIN table_lineage tl ON tl.super_class_id = parent.sys_id
 		)
-		SELECT DISTINCT ON (st.from_state, st.to_state)
+		SELECT DISTINCT ON (st.from_state_id, st.to_state_id)
 			st.sys_id,
-			st.from_state,
-			st.to_state,
+			st.from_state_id,
+			COALESCE(fs.name, st.from_state, '') AS from_state_name,
+			COALESCE(fs.label, st.from_state, '') AS from_state_label,
+			st.to_state_id,
+			COALESCE(ts.name, st.to_state, '') AS to_state_name,
+			COALESCE(ts.label, st.to_state, '') AS to_state_label,
 			st.label,
 			st.required_role_id,
 			st.condition_tree,
@@ -220,8 +521,10 @@ func (e *Engine) resolvePolymorphicTransitions(ctx context.Context, tableName, s
 			tl.name AS defined_in_table
 		FROM table_lineage tl
 		JOIN sys_state_transition st ON st.table_id = tl.sys_id
+		LEFT JOIN sys_state fs ON fs.sys_id = st.from_state_id
+		LEFT JOIN sys_state ts ON ts.sys_id = st.to_state_id
 		WHERE st.state_field = $2 AND st.is_active = TRUE
-		ORDER BY st.from_state, st.to_state, tl.depth ASC;
+		ORDER BY st.from_state_id, st.to_state_id, tl.depth ASC;
 	`
 
 	rows, err := e.db.Pool.Query(ctx, cte, tableName, stateField)
@@ -234,8 +537,11 @@ func (e *Engine) resolvePolymorphicTransitions(ctx context.Context, tableName, s
 	for rows.Next() {
 		var t TransitionInfo
 		if err := rows.Scan(
-			&t.TransitionID, &t.FromState, &t.ToState, &t.Label,
-			&t.RequiredRoleID, &t.ConditionTreeJSON, &t.OnTransitionAction,
+			&t.TransitionID,
+			&t.FromStateID, &t.FromState, &t.FromStateLabel,
+			&t.ToStateID, &t.ToState, &t.ToStateLabel,
+			&t.Label, &t.RequiredRoleID,
+			&t.ConditionTreeJSON, &t.OnTransitionAction,
 			&t.DefinedInTable,
 		); err != nil {
 			return nil, err

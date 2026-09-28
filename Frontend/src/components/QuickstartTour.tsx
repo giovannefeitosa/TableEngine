@@ -122,12 +122,14 @@ export function QuickstartTour() {
         });
       }
       if (!taskFields.some((f) => f.column_name === 'state')) {
+        const allTables = await api.schema.listTables(true);
+        const stateTable = allTables.find((t) => t.name === 'sys_state');
         await api.schema.addField(taskTable.sys_id, {
           column_name: 'state',
           label: 'Estado Operacional',
-          internal_type: 'string',
-          max_length: 40,
-          default_value: 'new',
+          internal_type: 'reference',
+          reference_table_id: stateTable?.sys_id,
+          default_value: '30000000-0000-0000-0000-000000000002',
         });
       }
       if (!taskFields.some((f) => f.column_name === 'number')) {

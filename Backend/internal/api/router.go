@@ -71,7 +71,13 @@ func SetupRouter(h *Handlers, authService *auth.Service, cfg *config.Config) *ch
 
 			pr.Post("/schema/numbers", h.ConfigureNumber)
 
-			// FSM & Rules Management
+			// FSM States & Transitions Management
+			pr.Get("/fsm/states", h.ListStates)
+			pr.Post("/fsm/states", h.CreateState)
+			pr.Get("/fsm/states/{state_id}", h.GetState)
+			pr.Put("/fsm/states/{state_id}", h.UpdateState)
+			pr.Delete("/fsm/states/{state_id}", h.DeleteState)
+
 			pr.Get("/fsm/transitions", h.ListTransitions)
 			pr.Post("/fsm/transitions", h.CreateTransition)
 			pr.Get("/fsm/transitions/{transition_id}", h.GetTransition)
