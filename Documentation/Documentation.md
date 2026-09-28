@@ -16,6 +16,8 @@ Esta arquitetura define a construção de um motor de dados dinâmico inspirado 
 * Numeração legível: a plataforma disponibiliza sys\_number e sys\_number\_counter desde a instalação. Qualquer entidade pode receber pela interface um campo number com prefixo de 1 a 3 caracteres e sequência, como TSK0000001. A tabela task continua sendo criada apenas quando solicitada pelo usuário.  
 * Autorização: Usuário → Grupos → Roles → Permissões, conforme a seção 11\. Toda operação é negada sem concessão aplicável. Não há cache de metadados, permissões ou numeração nesta fase; a engine consulta o PostgreSQL a cada operação.
 
+> 📊 **Diagrama do Banco de Dados (ERD)**: O diagrama interativo completo em Mermaid contendo todas as entidades, relacionamentos e cardinalidades pode ser consultado em [Database_Diagram.md](file:///g:/Documentos/TableEngine/Documentation/Database_Diagram.md).
+
 ## **2\. Catálogo do Kernel de Metadados (Data Dictionary)**
 
 A instalação cria exclusivamente as estruturas do Kernel: os catálogos abaixo, as entidades de identidade/autorização e numeração das subseções 2.1–2.3, além de sys\_audit, sys\_script e sys\_state\_transition, detalhadas nas seções 7–9. Todas são registradas em sys\_db\_object com is\_kernel\_table \= TRUE e têm seus campos registrados em sys\_dictionary; nenhuma tabela de negócio é instalada por padrão.
